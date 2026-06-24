@@ -1,0 +1,38 @@
+# CodeGuards — per-project code governance config
+# Place this in your project root to override defaults.
+# Any setting omitted falls back to the built-in default.
+
+guards:
+  file_length:
+    enabled: true
+    max_prod: 200      # Max lines for production files
+    max_test: 500      # Max lines for test files
+
+  function_length:
+    enabled: true
+    max: 50            # Max lines per function
+
+  forbidden_phrases:
+    enabled: true
+    # Add or remove patterns as needed
+    patterns:
+      - { pattern: "\\bfor now\\b", message: "use a definitive statement or remove" }
+      - { pattern: "\\btemporary\\b", message: "use a definitive statement or remove" }
+      - { pattern: "\\bshould\\b", message: "use `must` or remove" }
+      - { pattern: "\\bclean\\b", message: "describe the concrete design instead" }
+
+  action_items:
+    enabled: true
+    require_issue: true
+    # Everything matches this pattern:  // TODO(#123): description
+    # Or project-specific format:
+    # allowed_pattern: "//\\s*(TODO|FIXME)\\(#\\d+\\):"
+
+  credentials:
+    enabled: true
+    # Add credential patterns for your stack
+    patterns:
+      - { pattern: "AKIA[0-9A-Z]{16}", message: "AWS access key detected" }
+
+  glob_imports:
+    enabled: true
