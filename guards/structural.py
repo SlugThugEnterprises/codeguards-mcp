@@ -72,16 +72,17 @@ def check_responsibility_clusters(
             "file": str(path),
             "line": 1,
             "message": (
-                f"Structural: {len(domains)} distinct responsibility domains "
-                f"detected ({domain_detail}) — max {max_domains}. "
-                f"Extract separate modules by concern."
+                f"Mixed IO + business logic boundary risk: {len(domains)} responsibility "
+                f"domains detected: {', '.join(domains)}. "
+                f"Combining {', '.join(domains[:2])} creates coupling "
+                f"between unrelated concerns. Extract into separate modules."
             ),
             "guard": "responsibility_clusters",
             "principle": "SRP",
             "severity": "warning",
             "fix": (
-                f"Split by domain. Suggested modules: "
-                f"{', '.join(f'{d}/' for d in domains[:4])}"
+                f"Split by domain into: "
+                f"{', '.join(f'{d}_module/' for d in domains[:3])}"
             ),
         })
     return violations
@@ -103,19 +104,22 @@ def check_fan_out(path: Path, content: str, _cfg: dict) -> list[dict]:
     fanout = analysis.get("unique_imports", 0)
 
     if fanout > max_deps:
+        internal = analysis.get("internal_imports", 0)
+        external = analysis.get("external_imports", 0)
         violations.append({
             "file": str(path),
             "line": 1,
             "message": (
-                f"Structural hub: {fanout} unique dependencies (max {max_deps}). "
-                f"High fan-out → this module is becoming a coordination point/god object."
+                f"Structural hub: {fanout} unique dependencies "
+                f"({internal} internal, {external} external, max {max_deps}). "
+                f"High fan-out → coordination point forming/deep coupling."
             ),
             "guard": "fan_out",
             "principle": "SOC",
             "severity": "warning",
             "fix": (
-                f"Reduce dependencies. Delegate to focused service modules "
-                f"instead of importing {fanout} modules directly."
+                f"Delegate to focused service modules. Current: {internal} internal "
+                f"+ {external} external deps. Target < {max_deps} total."
             ),
         })
     return violations
