@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import generic
+from . import structural
 from detectors import detect_languages, walk_source_files
 
 
@@ -98,6 +99,20 @@ def run_checks(
                     "guard": "error",
                 })
 
+        # Run structural checks: responsibility clusters, fan-out, layer enforcement
+        for sname, sfn in structural.STRUCTURAL_CHECKS.items():
+            scfg = guards_cfg.get(sname, {})
+            if not scfg.get("enabled", True):
+                continue
+            try:
+                violations.extend(sfn(sf, content, scfg))
+            except Exception as e:
+                violations.append({
+                    "file": str(sf), "line": 0,
+                    "message": f"Structural guard {sname} error: {e}",
+                    "guard": "error",
+                })
+
         # Run plugin guards that match this file's language
         for guard in registry.guards:
             guard_langs = guard.get("languages", [])
@@ -120,6 +135,7 @@ def run_checks(
 
     # Project-level checks
     check_missing_tests(project_root, config, violations)
+    violations.extend(structural.check_growth_drift(project_root))
 
     # Enrich violations with fix suggestions from project intent
     enrich_with_fixes(project_root, violations)

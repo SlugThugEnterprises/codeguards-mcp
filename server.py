@@ -133,6 +133,20 @@ def create_app(registry: GuardRegistry):
                     "required": ["path", "modules", "global"],
                 },
             ),
+            Tool(
+                name="save_baseline",
+                description="Snapshot current structural health as baseline for growth drift detection. Run this after a clean check to set the comparison point.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the project root",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
         ]
         return tools
 
@@ -242,6 +256,15 @@ def create_app(registry: GuardRegistry):
                 "Guards will now enforce code quality against this declaration. "
                 "If code violates your declared intent, violations will include "
                 "the specific rule you declared."
+            ))]
+
+        elif name == "save_baseline":
+            from guards.structural import save_structural_baseline
+            project_path = arguments["path"]
+            baseline = save_structural_baseline(project_path)
+            return [TextContent(type="text", text=(
+                f"Structural baseline saved with {len(baseline)} files. "
+                f"Future checks will detect growth drift from this snapshot."
             ))]
 
         else:

@@ -53,6 +53,10 @@ DEFAULTS = {
         "swallowed_errors": {"enabled": True},
         "no_stubs": {"enabled": True},
         "missing_tests": {"enabled": True, "min_test_ratio": 0.3},
+        "responsibility_clusters": {"enabled": True, "max_domains": 3},
+        "fan_out": {"enabled": True, "max_dependencies": 10},
+        "structural_health": {"enabled": True, "min_score": 70},
+        "growth_drift": {"enabled": True},
     },
 }
 
