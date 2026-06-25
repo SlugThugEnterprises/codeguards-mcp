@@ -93,6 +93,46 @@ def create_app(registry: GuardRegistry):
                     "properties": {},
                 },
             ),
+            Tool(
+                name="declare_intent",
+                description="Declare architectural intent before writing code. Records module boundaries, error strategy, logging, testing, and tracing plans. Guards enforce against this declaration.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the project root",
+                        },
+                        "modules": {
+                            "type": "array",
+                            "description": "Module definitions with name, path, responsibility, error_strategy, logging, testing",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "path": {"type": "string"},
+                                    "responsibility": {"type": "string"},
+                                    "error_strategy": {"type": "string"},
+                                    "logging": {"type": "string"},
+                                    "testing": {"type": "string"},
+                                },
+                            },
+                        },
+                        "global": {
+                            "type": "object",
+                            "description": "Global rules: error_handling, logging, tracing, testing, architecture",
+                            "properties": {
+                                "error_handling": {"type": "string"},
+                                "logging": {"type": "string"},
+                                "tracing": {"type": "string"},
+                                "testing": {"type": "string"},
+                                "architecture": {"type": "string"},
+                            },
+                        },
+                    },
+                    "required": ["path", "modules", "global"],
+                },
+            ),
         ]
         return tools
 
@@ -164,47 +204,45 @@ def create_app(registry: GuardRegistry):
         elif name == "list_guards":
             guards_info = []
             # Generic guards
-            guards_info.append({
-                "name": "file_length",
-                "languages": "all",
-                "description": "Files must not exceed max line count",
-            })
-            guards_info.append({
-                "name": "function_length",
-                "languages": "all",
-                "description": "Functions must not exceed max line count",
-            })
-            guards_info.append({
-                "name": "forbidden_phrases",
-                "languages": "all",
-                "description": "No weasel words or vague language",
-            })
-            guards_info.append({
-                "name": "credentials",
-                "languages": "all",
-                "description": "No API keys or secrets in source",
-            })
-            guards_info.append({
-                "name": "action_items",
-                "languages": "all",
-                "description": "TODO/FIXME must link to an issue",
-            })
-            guards_info.append({
-                "name": "glob_imports",
-                "languages": "all",
-                "description": "No wildcard imports",
-            })
-            # Plugin guards
+            guards_info.append({"name": "file_length", "languages": "all", "description": "Files must not exceed max line count"})
+            guards_info.append({"name": "function_length", "languages": "all", "description": "Functions must not exceed max line count"})
+            guards_info.append({"name": "god_file", "languages": "all", "description": "Too many public items or imports — SRP violation"})
+            guards_info.append({"name": "forbidden_phrases", "languages": "all", "description": "No weasel words or vague language"})
+            guards_info.append({"name": "glob_imports", "languages": "all", "description": "No wildcard imports"})
+            guards_info.append({"name": "debug_statements", "languages": "all", "description": "No println/console.log in production code"})
+            guards_info.append({"name": "commented_code", "languages": "all", "description": "No dead code in comments"})
+            guards_info.append({"name": "magic_numbers", "languages": "all", "description": "No unexplained numeric literals"})
+            guards_info.append({"name": "duplicated_code", "languages": "all", "description": "No copy-paste code blocks"})
+            guards_info.append({"name": "unsafe_patterns", "languages": "all", "description": "No eval/exec/unsafe blocks"})
+            guards_info.append({"name": "deep_nesting", "languages": "all", "description": "Max 3 nesting levels"})
+            guards_info.append({"name": "parameter_count", "languages": "all", "description": "Max 5 function parameters"})
+            guards_info.append({"name": "credentials", "languages": "all", "description": "No API keys or secrets in source"})
+            guards_info.append({"name": "action_items", "languages": "all", "description": "TODO/FIXME must link to an issue"})
+            guards_info.append({"name": "hardcoded_values", "languages": "all", "description": "No raw URLs/IPs/ports as literals"})
+            guards_info.append({"name": "missing_docs", "languages": "all", "description": "Public items need docstrings"})
+            guards_info.append({"name": "swallowed_errors", "languages": "all", "description": "No empty catch/except blocks"})
+            guards_info.append({"name": "no_stubs", "languages": "all", "description": "No todo!/unimplemented! in production"})
+            guards_info.append({"name": "missing_tests", "languages": "all", "description": "Source files must have matching test files"})
             for g in registry.guards:
-                guards_info.append({
-                    "name": g["name"],
-                    "languages": g.get("languages", []),
-                    "description": g.get("description", ""),
-                })
-            return [TextContent(
-                type="text",
-                text=json.dumps({"guards": guards_info}, indent=2),
-            )]
+                guards_info.append({"name": g["name"], "languages": g.get("languages", []), "description": g.get("description", "")})
+            return [TextContent(type="text", text=json.dumps({"guards": guards_info}, indent=2))]
+
+        elif name == "declare_intent":
+            from intent import save_intent, get_intent_summary
+            project_path = arguments["path"]
+            intent_data = {
+                "modules": arguments.get("modules", []),
+                "global": arguments.get("global", {}),
+            }
+            save_path = save_intent(project_path, intent_data)
+            summary = get_intent_summary(intent_data)
+            return [TextContent(type="text", text=(
+                f"Architectural intent saved to {save_path}\n\n"
+                f"{summary}\n\n"
+                "Guards will now enforce code quality against this declaration. "
+                "If code violates your declared intent, violations will include "
+                "the specific rule you declared."
+            ))]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

@@ -121,6 +121,9 @@ def run_checks(
     # Project-level checks
     check_missing_tests(project_root, config, violations)
 
+    # Enrich violations with fix suggestions from project intent
+    enrich_with_fixes(project_root, violations)
+
     return violations
 
 
@@ -189,6 +192,67 @@ def check_missing_tests(project_root: str, config: dict, violations: list[dict])
                 "principle": "Testing",
                 "untested_files": [str(u.relative_to(root)) for u in untested[:20]],
             })
+
+
+def enrich_with_fixes(project_root: str, violations: list[dict]):
+    """Post-process: add fix suggestions and intent cross-reference to violations."""
+    from intent import load_intent, check_intent_violation
+
+    intent = load_intent(project_root)
+
+    for v in violations:
+        guard = v.get("guard", "")
+
+        # Cross-reference against declared intent
+        if intent and v.get("file"):
+            intent_msg = check_intent_violation(guard, v.get("file", ""), "", intent)
+            if intent_msg:
+                v["message"] = f"{v['message']} {intent_msg}"
+
+        # Add fix suggestions if not already present
+        if "fix" not in v:
+            fix = _generate_fix(guard, v)
+            if fix:
+                v["fix"] = fix
+
+
+def _generate_fix(guard: str, v: dict) -> str | None:
+    """Generate a fix suggestion based on guard type and violation context."""
+    if guard == "function_length":
+        line = v.get("line", 0)
+        msg = v.get("message", "")
+        return "Split into smaller functions. Extract the largest logical sub-blocks into named functions that describe what they compute."
+
+    if guard == "deep_nesting":
+        return "Refactor with early returns / guard clauses. Invert deep conditions and return early to flatten the happy path."
+
+    if guard == "parameter_count":
+        return "Group parameters into a struct, config object, or builder pattern."
+
+    if guard == "swallowed_errors":
+        return "Handle the error: log it, wrap it in your error type, or propagate it upward. Never silently discard errors."
+
+    if guard == "no_stubs":
+        return "Replace this stub with a real implementation, or add a link to the tracking issue."
+
+    if guard == "hardcoded_values":
+        return "Extract this value to a configuration constant, environment variable, or config file."
+
+    if guard == "missing_docs":
+        return "Add a doc comment explaining what this function does, its parameters, and return value."
+
+    if guard == "magic_numbers":
+        return "Extract this number to a named constant that explains what it represents."
+
+    if guard == "duplicated_code":
+        return "Extract the duplicated logic into a shared function. Identify what varies and make that the parameter."
+
+    if guard == "missing_tests":
+        untested = v.get("untested_files", [])
+        if untested:
+            return f"Create test files for these untested modules. Write the first failing test before implementing: {', '.join(untested[:3])}"
+
+    return None
 
 
 _GENERIC_CHECKS = generic.ALL_GENERIC_CHECKS

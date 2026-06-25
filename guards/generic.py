@@ -12,6 +12,20 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from fixes import (
+    fix_file_length,
+    fix_function_length,
+    fix_god_file,
+    fix_deep_nesting,
+    fix_parameter_count,
+    fix_swallowed_error,
+    fix_no_stubs,
+    fix_hardcoded_value,
+    fix_missing_docs,
+    fix_magic_number,
+    fix_duplicated_code,
+)
+
 
 # ──────────────────────────────────────────────
 # Architecture — SOC, SRP, modularity
@@ -28,7 +42,8 @@ def check_file_length(path: Path, content: str, cfg: dict) -> list[dict]:
     if line_count > max_lines:
         return [{"file": str(path), "line": 1,
                  "message": f"File exceeds {max_lines} lines ({line_count}) — split into smaller modules (SRP)",
-                 "guard": "file_length", "principle": "SOC"}]
+                 "guard": "file_length", "principle": "SOC",
+                 "fix": fixes.fix_file_length(path, content, line_count, max_lines)}]
     return []
 
 
