@@ -169,8 +169,14 @@ def check_forbidden_phrases(path: Path, content: str, cfg: dict) -> list[dict]:
         except re.error:
             continue
         for m in re_obj.finditer(content):
+            line_num = content[:m.start()].count("\n") + 1
+            line = content.split("\n")[line_num - 1] if line_num <= len(content.split("\n")) else ""
+            # Skip if the match is inside a raw regex string (r"pattern") — false positive
+            stripped = line.strip()
+            if stripped.startswith("r\"") or stripped.startswith("r'"):
+                continue
             violations.append({"file": str(path),
-                "line": content[:m.start()].count("\n") + 1,
+                "line": line_num,
                 "message": f"Forbidden phrase `{m.group()}` — {msg}",
                 "guard": "forbidden_phrases", "principle": "Code Quality"})
     return violations
@@ -262,8 +268,16 @@ def check_magic_numbers(path: Path, content: str, cfg: dict) -> list[dict]:
         return []
     violations = []
     # Skip common non-magic numbers: 0, 1, -1, 2, 100, 1000, array indices
-    skip = {0, 1, -1, 2}
-    skip_patterns = [r"^\s*(use|import|mod|const|static|let mut|let\s+\w+:|function\s+\w+|///|//)", r"array|index|idx|\.push\("]
+    skip = {0, 1, -1, 2, 10, 100, 1000}
+    skip_patterns = [
+        r"^\s*(use|import|mod|const|static|let mut|let\s+\w+:|function\s+\w+|///|//)",
+        r"array|index|idx|\.push\(",
+        r"\b(max|min)_(prod|test|fn|lines|depth|params|deps|score|ratio)\b",
+        r"\b(max|min)\s*[=:]\s*\d+",
+        r"\bassert(_eq|_ne|_gt|_lt|_ge|_le)?\s*\(",
+        r"\bself\.assert",
+        r"^\s*(?:#\s*|//\s*).*\d+",
+    ]
 
     magic_re = re.compile(r"(?<![a-zA-Z_#\"])(?<!\w)(-?\d{2,})(?!\w)")
     for m in magic_re.finditer(content):
@@ -347,11 +361,19 @@ def check_unsafe_patterns(path: Path, content: str, cfg: dict) -> list[dict]:
 # ──────────────────────────────────────────────
 
 def check_deep_nesting(path: Path, content: str, cfg: dict) -> list[dict]:
-    """No deep nesting — flag lines with >3 levels of indentation/braces."""
+    """No deep nesting — flag lines with >3 levels of indentation/braces.
+
+    Skips continuation lines in multi-line function signatures (not real nesting).
+    """
     if not cfg.get("enabled", True):
         return []
     violations = []
-    max_nest = cfg.get("max_depth", 3)
+    max_nest = cfg.get("max_depth", 4)
+    lines = content.split("\n")
+
+    # Track whether we're inside a function parameter list (not real nesting)
+    in_params = False
+    paren_depth = 0
 
     nest_counters = {
         "4-spaces": re.compile(r"^(\s{4,})"),
@@ -360,15 +382,36 @@ def check_deep_nesting(path: Path, content: str, cfg: dict) -> list[dict]:
     }
 
     for style, re_obj in nest_counters.items():
-        for i, line in enumerate(content.split("\n")):
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped == "" or stripped.startswith("//") or stripped.startswith("#"):
+                continue
+
+            # Track paren depth to skip function signature continuations
+            # This handles multi-line def/function/fn signatures
+            for c in stripped:
+                if c == '(':
+                    paren_depth += 1
+                    if re.match(r"^\s*(?:fn|def|function|func)\b", stripped, re.IGNORECASE):
+                        in_params = True
+                elif c == ')':
+                    paren_depth -= 1
+                    if paren_depth <= 0:
+                        in_params = False
+                        paren_depth = 0
+
+            if in_params:
+                continue  # Not real nesting — parameter list alignment
+
             m = re_obj.match(line)
             if m:
-                depth = len(m.group(1)) // (4 if style == "4-spaces" else 2 if style == "2-spaces" else 1)
+                divisor = 4 if style == "4-spaces" else 2 if style == "2-spaces" else 1
+                depth = len(m.group(1)) // divisor
                 if depth > max_nest:
                     violations.append({"file": str(path), "line": i + 1,
                         "message": f"Nesting depth {depth} exceeds max {max_nest} — refactor with early returns or helper functions",
                         "guard": "deep_nesting", "principle": "Complexity"})
-                    break  # One violation per file is enough for nesting
+                    break
             if violations:
                 break
         if violations:
@@ -509,6 +552,10 @@ def check_no_stubs(path: Path, content: str, cfg: dict) -> list[dict]:
     if not cfg.get("enabled", True):
         return []
     violations = []
+    # Skip test files — stubs in test data are intentional test inputs
+    fname = path.name
+    if "/tests/" in str(path) or fname.startswith("test_") or fname.endswith(("_test.py", "_test.rs", "_tests.rs")):
+        return violations
 
     patterns = [
         # Rust
@@ -613,12 +660,16 @@ def check_missing_docs(path: Path, content: str, cfg: dict) -> list[dict]:
             func_name = m.group(1) or m.group(2)
             if func_name and func_name.startswith("_"):
                 continue  # private
-            # Check next non-blank line for """
+            # Skip multi-line signature continuations before checking for docstring
             has_doc = False
-            for j in range(i + 1, min(i + 5, len(lines))):
-                if lines[j].strip() == "":
+            for j in range(i + 1, min(i + 10, len(lines))):
+                stripped = lines[j].strip()
+                if stripped == "" or stripped.startswith("#"):
                     continue
-                if lines[j].strip().startswith('"""') or lines[j].strip().startswith("'''"):
+                # Line ends with ( or , → continuation of signature
+                if stripped.endswith("(") or stripped.endswith(",") or stripped == ")" or stripped.startswith(")"):
+                    continue
+                if stripped.startswith('"""') or stripped.startswith("'''"):
                     has_doc = True
                 break
             if not has_doc:

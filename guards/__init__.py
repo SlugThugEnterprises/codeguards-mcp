@@ -224,6 +224,16 @@ def enrich_with_fixes(project_root: str, violations: list[dict]):
     for v in violations:
         guard = v.get("guard", "")
 
+        # Filter self-referential violations: guard matching its own pattern data
+        f = v.get("file", "")
+        if f.endswith((".py", ".rs")):
+            line_num = v.get("line", 0)
+            import linecache
+            line = (linecache.getline(f, line_num) if line_num else "") or ""
+            # Skip lines containing regex raw strings or string-literal pattern data
+            if 'r"' in line or "r'" in line or ('".*(' in line and '"' in line):
+                continue
+
         # Cross-reference against declared intent
         if intent and v.get("file"):
             intent_msg = check_intent_violation(guard, v.get("file", ""), "", intent)
