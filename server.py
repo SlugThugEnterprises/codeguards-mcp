@@ -120,17 +120,10 @@ def create_app(registry: GuardRegistry):
             except Exception as e:
                 return [TextContent(type="text", text=f"Error reading {file_path}: {e}")]
 
-            # Run generic guards
-            from guards import generic
+            # Run all generic guards
+            from guards.generic import ALL_GENERIC_CHECKS
             violations = []
-            for guard_name, check_fn in [
-                ("file_length", generic.check_file_length),
-                ("function_length", generic.check_function_length),
-                ("forbidden_phrases", generic.check_forbidden_phrases),
-                ("credentials", generic.check_credentials),
-                ("action_items", generic.check_action_items),
-                ("glob_imports", generic.check_glob_imports),
-            ]:
+            for guard_name, check_fn in ALL_GENERIC_CHECKS.items():
                 guard_cfg = config.get("guards", {}).get(guard_name, {})
                 try:
                     violations.extend(check_fn(Path(file_path), content, guard_cfg))

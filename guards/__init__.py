@@ -121,11 +121,4 @@ def run_checks(
     return violations
 
 
-_GENERIC_CHECKS = {
-    "file_length": generic.check_file_length,
-    "function_length": generic.check_function_length,
-    "forbidden_phrases": generic.check_forbidden_phrases,
-    "credentials": generic.check_credentials,
-    "action_items": generic.check_action_items,
-    "glob_imports": generic.check_glob_imports,
-}
+_GENERIC_CHECKS = generic.ALL_GENERIC_CHECKS

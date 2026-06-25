@@ -6,15 +6,9 @@ from typing import Any
 
 DEFAULTS = {
     "guards": {
-        "file_length": {
-            "enabled": True,
-            "max_prod": 200,
-            "max_test": 500,
-        },
-        "function_length": {
-            "enabled": True,
-            "max": 50,
-        },
+        "file_length": {"enabled": True, "max_prod": 200, "max_test": 500},
+        "function_length": {"enabled": True, "max": 50},
+        "god_file": {"enabled": True, "max_public_items": 15, "max_imports": 20},
         "forbidden_phrases": {
             "enabled": True,
             "patterns": [

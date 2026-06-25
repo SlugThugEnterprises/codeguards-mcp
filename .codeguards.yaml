@@ -1,38 +1,74 @@
 # CodeGuards — per-project code governance config
 # Place this in your project root to override defaults.
-# Any setting omitted falls back to the built-in default.
+# Set any guard to enabled: false to disable it.
 
 guards:
+  # ── Architecture ──
   file_length:
     enabled: true
-    max_prod: 200      # Max lines for production files
-    max_test: 500      # Max lines for test files
+    max_prod: 200
+    max_test: 500
 
   function_length:
     enabled: true
-    max: 50            # Max lines per function
+    max: 50
 
+  god_file:
+    enabled: true
+    max_public_items: 15
+    max_imports: 20
+
+  # ── Code Quality ──
   forbidden_phrases:
     enabled: true
-    # Add or remove patterns as needed
     patterns:
-      - { pattern: "\\bfor now\\b", message: "use a definitive statement or remove" }
-      - { pattern: "\\btemporary\\b", message: "use a definitive statement or remove" }
-      - { pattern: "\\bshould\\b", message: "use `must` or remove" }
-      - { pattern: "\\bclean\\b", message: "describe the concrete design instead" }
-
-  action_items:
-    enabled: true
-    require_issue: true
-    # Everything matches this pattern:  // TODO(#123): description
-    # Or project-specific format:
-    # allowed_pattern: "//\\s*(TODO|FIXME)\\(#\\d+\\):"
-
-  credentials:
-    enabled: true
-    # Add credential patterns for your stack
-    patterns:
-      - { pattern: "AKIA[0-9A-Z]{16}", message: "AWS access key detected" }
+      - { pattern: "\\bfor now\\b", message: use a definitive statement or remove }
+      - { pattern: "\\btemporary\\b", message: use a definitive statement or remove }
+      - { pattern: "\\bshould\\b", message: use `must` or remove }
+      - { pattern: "\\bclean\\b", message: describe the concrete design instead }
+      - { pattern: "\\bsimple\\b", message: describe the concrete design instead }
+      - { pattern: "\\bmaybe\\b", message: use a definitive statement or remove }
 
   glob_imports:
     enabled: true
+
+  debug_statements:
+    enabled: true
+
+  commented_code:
+    enabled: true
+    min_lines: 5
+
+  magic_numbers:
+    enabled: true
+
+  duplicated_code:
+    enabled: true
+    n_gram_size: 5
+    min_repeats: 2
+    min_line_len: 10
+
+  # ── Complexity ──
+  deep_nesting:
+    enabled: true
+    max_depth: 3
+
+  parameter_count:
+    enabled: true
+    max_params: 5
+
+  # ── Security ──
+  credentials:
+    enabled: true
+    patterns:
+      - { pattern: "AKIA[0-9A-Z]{16}", message: "AWS access key detected" }
+      - { pattern: "sk-[a-zA-Z0-9]{20,}", message: "OpenAI API key detected" }
+      - { pattern: "ghp_[a-zA-Z0-9]{36}", message: "GitHub token detected" }
+
+  unsafe_patterns:
+    enabled: true
+
+  # ── Maintainability ──
+  action_items:
+    enabled: true
+    require_issue: true
