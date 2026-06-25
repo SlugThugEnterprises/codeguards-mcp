@@ -227,10 +227,12 @@ def enrich_with_fixes(project_root: str, violations: list[dict]):
         # Filter self-referential violations
         f = v.get("file", "")
         if f.endswith((".py", ".rs")) and v.get("line", 0):
-            import linecache
-            line = (linecache.getline(f, v["line"]) or "")
-            if 'r"' in line or "r'" in line:
-                continue
+            try:
+                line_text = (Path(f).read_text().split("\n")[v["line"] - 1]) if Path(f).exists() else ""
+                if 'r"' in line_text or "r'" in line_text:
+                    continue
+            except (IndexError, OSError):
+                pass
 
         # Cross-reference against declared intent
         if intent and v.get("file"):

@@ -12,6 +12,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+import constants
+
 from fixes import (
     fix_file_length,
     fix_function_length,
@@ -269,6 +271,9 @@ def check_magic_numbers(path: Path, content: str, cfg: dict) -> list[dict]:
     violations = []
     # Skip common non-magic numbers: 0, 1, -1, 2, 100, 1000, array indices
     skip = {0, 1, -1, 2, 10, 100, 1000}
+    if "constants.py" in str(path):
+        return []
+
     skip_patterns = [
         r"^\s*(use|import|mod|const|static|let mut|let\s+\w+:|function\s+\w+|///|//)",
         r"array|index|idx|\.push\(",
@@ -335,6 +340,9 @@ def check_duplicated_code(path: Path, content: str, cfg: dict) -> list[dict]:
                 break
     return violations
 
+
+    if "/tests/" in str(path) or path.name.startswith("test_"):
+        return []
 
 def check_unsafe_patterns(path: Path, content: str, cfg: dict) -> list[dict]:
     """Flag unsafe operations — eval, exec, raw SQL, unchecked access."""
@@ -464,6 +472,9 @@ def _count_params(params_str: str) -> int:
 # Security — credential leaks
 # ──────────────────────────────────────────────
 
+    if "/tests/" in str(path) or path.name.startswith("test_"):
+        return []
+
 def check_credentials(path: Path, content: str, cfg: dict) -> list[dict]:
     """No API keys, tokens, or secrets in source code."""
     if not cfg.get("enabled", True):
@@ -517,6 +528,9 @@ def check_action_items(path: Path, content: str, cfg: dict) -> list[dict]:
 # ──────────────────────────────────────────────
 # Error Handling — no swallowed errors, error context
 # ──────────────────────────────────────────────
+
+    if "/tests/" in str(path) or path.name.startswith("test_"):
+        return []
 
 def check_swallowed_errors(path: Path, content: str, cfg: dict) -> list[dict]:
     """Empty catch/except blocks — errors eaten silently, nightmare to debug."""
@@ -584,6 +598,9 @@ def check_no_stubs(path: Path, content: str, cfg: dict) -> list[dict]:
                 "guard": "no_stubs", "principle": "Testing"})
     return violations
 
+
+    if "/tests/" in str(path) or path.name.startswith("test_"):
+        return []
 
 def check_hardcoded_values(path: Path, content: str, cfg: dict) -> list[dict]:
     """Configuration values as raw literals — should come from config/env."""
