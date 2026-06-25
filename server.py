@@ -11,9 +11,11 @@ Register with Hermes:
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from config import load_config
 from detectors import detect_languages
@@ -29,246 +31,214 @@ except ImportError:
     HAS_MCP = False
 
 
-def create_app(registry: GuardRegistry):
-    """Create an MCP server application."""
-    server = Server("codeguards")
+# ──────────────────────────────────────────────
+# Tool handlers — one async function per tool
+# Each can be imported and tested independently
+# ──────────────────────────────────────────────
 
-    # Store registry on server instance
+async def handle_check_project(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    path = arguments["path"]
+    config = load_config(path)
+    languages = detect_languages(path)
+    violations = run_checks(path, config, registry, languages)
+    return [TextContent(type="text", text=format_report(path, violations, languages, config))]
+
+
+async def handle_check_file(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    file_path = arguments["path"]
+    project_root = arguments.get("project_root", os.path.dirname(file_path))
+    config = load_config(project_root)
+    languages = detect_languages(project_root)
+
+    try:
+        content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return [TextContent(type="text", text=f"Error reading {file_path}: {e}")]
+
+    from guards.generic import ALL_GENERIC_CHECKS
+    violations = []
+    for guard_name, check_fn in ALL_GENERIC_CHECKS.items():
+        guard_cfg = config.get("guards", {}).get(guard_name, {})
+        try:
+            violations.extend(check_fn(Path(file_path), content, guard_cfg))
+        except Exception as e:
+            violations.append({
+                "file": file_path, "line": 0,
+                "message": f"Guard {guard_name} error: {e}",
+                "guard": "error",
+            })
+
+    for guard in registry.guards:
+        guard_langs = guard.get("languages", [])
+        if guard_langs and not any(l in languages for l in guard_langs):
+            continue
+        try:
+            violations.extend(guard["check_fn"](Path(file_path), content, {}))
+        except Exception as e:
+            violations.append({
+                "file": file_path, "line": 0,
+                "message": f"Guard {guard['name']} error: {e}",
+                "guard": "error",
+            })
+
+    return [TextContent(type="text", text=format_report(file_path, violations, languages, config))]
+
+
+async def handle_detect_languages(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    path = arguments["path"]
+    languages = detect_languages(path)
+    return [TextContent(type="text", text=json.dumps({"languages": languages, "detected_at": path}, indent=2))]
+
+
+async def handle_list_guards(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    guard_descriptions = [
+        ("file_length", "Files must not exceed max line count"),
+        ("function_length", "Functions must not exceed max line count"),
+        ("god_file", "Too many public items or imports — SRP violation"),
+        ("forbidden_phrases", "No weasel words or vague language"),
+        ("glob_imports", "No wildcard imports"),
+        ("debug_statements", "No println/console.log in production code"),
+        ("commented_code", "No dead code in comments"),
+        ("magic_numbers", "No unexplained numeric literals"),
+        ("duplicated_code", "No copy-paste code blocks"),
+        ("unsafe_patterns", "No eval/exec/unsafe blocks"),
+        ("deep_nesting", "Max 3 nesting levels"),
+        ("parameter_count", "Max 5 function parameters"),
+        ("credentials", "No API keys or secrets in source"),
+        ("action_items", "TODO/FIXME must link to an issue"),
+        ("hardcoded_values", "No raw URLs/IPs/ports as literals"),
+        ("missing_docs", "Public items need docstrings"),
+        ("swallowed_errors", "No empty catch/except blocks"),
+        ("no_stubs", "No todo!/unimplemented! in production"),
+        ("missing_tests", "Source files must have matching test files"),
+    ]
+    guards_info = [{"name": n, "languages": "all", "description": d} for n, d in guard_descriptions]
+    for g in registry.guards:
+        guards_info.append({
+            "name": g["name"],
+            "languages": g.get("languages", []),
+            "description": g.get("description", ""),
+        })
+    return [TextContent(type="text", text=json.dumps({"guards": guards_info}, indent=2))]
+
+
+async def handle_declare_intent(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    from intent import save_intent, get_intent_summary
+    project_path = arguments["path"]
+    intent_data = {
+        "modules": arguments.get("modules", []),
+        "global": arguments.get("global", {}),
+    }
+    save_path = save_intent(project_path, intent_data)
+    summary = get_intent_summary(intent_data)
+    return [TextContent(type="text", text=(
+        f"Architectural intent saved to {save_path}\n\n"
+        f"{summary}\n\n"
+        "Guards will now enforce code quality against this declaration. "
+        "If code violates your declared intent, violations will include "
+        "the specific rule you declared."
+    ))]
+
+
+async def handle_save_baseline(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    from guards.structural import save_structural_baseline
+    project_path = arguments["path"]
+    baseline = save_structural_baseline(project_path)
+    return [TextContent(type="text", text=(
+        f"Structural baseline saved with {len(baseline)} files. "
+        f"Future checks will detect growth drift from this snapshot."
+    ))]
+
+
+# Dispatch table — adding a tool = one function + one dict entry
+TOOL_HANDLERS: dict[str, Callable] = {
+    "check_project": handle_check_project,
+    "check_file": handle_check_file,
+    "detect_languages": handle_detect_languages,
+    "list_guards": handle_list_guards,
+    "declare_intent": handle_declare_intent,
+    "save_baseline": handle_save_baseline,
+}
+
+TOOL_DEFINITIONS: list[Tool] = [
+    Tool(
+        name="check_project",
+        description="Run all applicable code guards against a project directory",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Path to the project root"},
+        }, "required": ["path"]},
+    ),
+    Tool(
+        name="check_file",
+        description="Run all applicable checks on a single file",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Path to the file to check"},
+            "project_root": {"type": "string", "description": "Project root (for config detection)"},
+        }, "required": ["path"]},
+    ),
+    Tool(
+        name="detect_languages",
+        description="Detect what languages a project uses",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Path to the project root"},
+        }, "required": ["path"]},
+    ),
+    Tool(
+        name="list_guards",
+        description="List all available guard checks and which languages they apply to",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="declare_intent",
+        description="Declare architectural intent before writing code. Records module boundaries, error strategy, logging, testing, and tracing plans. Guards enforce against this declaration.",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Path to the project root"},
+            "modules": {"type": "array", "description": "Module definitions",
+                "items": {"type": "object", "properties": {
+                    "name": {"type": "string"},
+                    "path": {"type": "string"},
+                    "responsibility": {"type": "string"},
+                    "error_strategy": {"type": "string"},
+                    "logging": {"type": "string"},
+                    "testing": {"type": "string"},
+                }},
+            },
+            "global": {"type": "object", "description": "Global rules",
+                "properties": {
+                    "error_handling": {"type": "string"},
+                    "logging": {"type": "string"},
+                    "tracing": {"type": "string"},
+                    "testing": {"type": "string"},
+                    "architecture": {"type": "string"},
+                },
+            },
+        }, "required": ["path", "modules", "global"]},
+    ),
+    Tool(
+        name="save_baseline",
+        description="Snapshot current structural health as baseline for growth drift detection",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Path to the project root"},
+        }, "required": ["path"]},
+    ),
+]
+
+
+def create_app(registry: GuardRegistry):
+    """Create an MCP server application with dispatch table."""
+    server = Server("codeguards")
     server._guard_registry = registry
 
     @server.list_tools()
     async def list_tools():
-        tools = [
-            Tool(
-                name="check_project",
-                description="Run all applicable code guards against a project directory",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the project root",
-                        },
-                    },
-                    "required": ["path"],
-                },
-            ),
-            Tool(
-                name="check_file",
-                description="Run all applicable checks on a single file",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file to check",
-                        },
-                        "project_root": {
-                            "type": "string",
-                            "description": "Project root (for config detection)",
-                        },
-                    },
-                    "required": ["path"],
-                },
-            ),
-            Tool(
-                name="detect_languages",
-                description="Detect what languages a project uses",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the project root",
-                        },
-                    },
-                    "required": ["path"],
-                },
-            ),
-            Tool(
-                name="list_guards",
-                description="List all available guard checks and which languages they apply to",
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                },
-            ),
-            Tool(
-                name="declare_intent",
-                description="Declare architectural intent before writing code. Records module boundaries, error strategy, logging, testing, and tracing plans. Guards enforce against this declaration.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the project root",
-                        },
-                        "modules": {
-                            "type": "array",
-                            "description": "Module definitions with name, path, responsibility, error_strategy, logging, testing",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "path": {"type": "string"},
-                                    "responsibility": {"type": "string"},
-                                    "error_strategy": {"type": "string"},
-                                    "logging": {"type": "string"},
-                                    "testing": {"type": "string"},
-                                },
-                            },
-                        },
-                        "global": {
-                            "type": "object",
-                            "description": "Global rules: error_handling, logging, tracing, testing, architecture",
-                            "properties": {
-                                "error_handling": {"type": "string"},
-                                "logging": {"type": "string"},
-                                "tracing": {"type": "string"},
-                                "testing": {"type": "string"},
-                                "architecture": {"type": "string"},
-                            },
-                        },
-                    },
-                    "required": ["path", "modules", "global"],
-                },
-            ),
-            Tool(
-                name="save_baseline",
-                description="Snapshot current structural health as baseline for growth drift detection. Run this after a clean check to set the comparison point.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the project root",
-                        },
-                    },
-                    "required": ["path"],
-                },
-            ),
-        ]
-        return tools
+        return TOOL_DEFINITIONS
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-        if name == "check_project":
-            path = arguments["path"]
-            config = load_config(path)
-            languages = detect_languages(path)
-            violations = run_checks(path, config, registry, languages)
-            return [TextContent(
-                type="text",
-                text=format_report(path, violations, languages, config),
-            )]
-
-        elif name == "check_file":
-            file_path = arguments["path"]
-            project_root = arguments.get("project_root", os.path.dirname(file_path))
-            config = load_config(project_root)
-            languages = detect_languages(project_root)
-
-            # Read the file
-            try:
-                content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error reading {file_path}: {e}")]
-
-            # Run all generic guards
-            from guards.generic import ALL_GENERIC_CHECKS
-            violations = []
-            for guard_name, check_fn in ALL_GENERIC_CHECKS.items():
-                guard_cfg = config.get("guards", {}).get(guard_name, {})
-                try:
-                    violations.extend(check_fn(Path(file_path), content, guard_cfg))
-                except Exception as e:
-                    violations.append({
-                        "file": file_path, "line": 0,
-                        "message": f"Guard {guard_name} error: {e}",
-                        "guard": "error",
-                    })
-
-            # Run plugin guards that match
-            for guard in registry.guards:
-                guard_langs = guard.get("languages", [])
-                if guard_langs and not any(l in languages for l in guard_langs):
-                    continue
-                try:
-                    violations.extend(guard["check_fn"](Path(file_path), content, {}))
-                except Exception as e:
-                    violations.append({
-                        "file": file_path, "line": 0,
-                        "message": f"Guard {guard['name']} error: {e}",
-                        "guard": "error",
-                    })
-
-            return [TextContent(
-                type="text",
-                text=format_report(file_path, violations, languages, config),
-            )]
-
-        elif name == "detect_languages":
-            path = arguments["path"]
-            languages = detect_languages(path)
-            return [TextContent(
-                type="text",
-                text=json.dumps({"languages": languages, "detected_at": path}, indent=2),
-            )]
-
-        elif name == "list_guards":
-            guards_info = []
-            # Generic guards
-            guards_info.append({"name": "file_length", "languages": "all", "description": "Files must not exceed max line count"})
-            guards_info.append({"name": "function_length", "languages": "all", "description": "Functions must not exceed max line count"})
-            guards_info.append({"name": "god_file", "languages": "all", "description": "Too many public items or imports — SRP violation"})
-            guards_info.append({"name": "forbidden_phrases", "languages": "all", "description": "No weasel words or vague language"})
-            guards_info.append({"name": "glob_imports", "languages": "all", "description": "No wildcard imports"})
-            guards_info.append({"name": "debug_statements", "languages": "all", "description": "No println/console.log in production code"})
-            guards_info.append({"name": "commented_code", "languages": "all", "description": "No dead code in comments"})
-            guards_info.append({"name": "magic_numbers", "languages": "all", "description": "No unexplained numeric literals"})
-            guards_info.append({"name": "duplicated_code", "languages": "all", "description": "No copy-paste code blocks"})
-            guards_info.append({"name": "unsafe_patterns", "languages": "all", "description": "No eval/exec/unsafe blocks"})
-            guards_info.append({"name": "deep_nesting", "languages": "all", "description": "Max 3 nesting levels"})
-            guards_info.append({"name": "parameter_count", "languages": "all", "description": "Max 5 function parameters"})
-            guards_info.append({"name": "credentials", "languages": "all", "description": "No API keys or secrets in source"})
-            guards_info.append({"name": "action_items", "languages": "all", "description": "TODO/FIXME must link to an issue"})
-            guards_info.append({"name": "hardcoded_values", "languages": "all", "description": "No raw URLs/IPs/ports as literals"})
-            guards_info.append({"name": "missing_docs", "languages": "all", "description": "Public items need docstrings"})
-            guards_info.append({"name": "swallowed_errors", "languages": "all", "description": "No empty catch/except blocks"})
-            guards_info.append({"name": "no_stubs", "languages": "all", "description": "No todo!/unimplemented! in production"})
-            guards_info.append({"name": "missing_tests", "languages": "all", "description": "Source files must have matching test files"})
-            for g in registry.guards:
-                guards_info.append({"name": g["name"], "languages": g.get("languages", []), "description": g.get("description", "")})
-            return [TextContent(type="text", text=json.dumps({"guards": guards_info}, indent=2))]
-
-        elif name == "declare_intent":
-            from intent import save_intent, get_intent_summary
-            project_path = arguments["path"]
-            intent_data = {
-                "modules": arguments.get("modules", []),
-                "global": arguments.get("global", {}),
-            }
-            save_path = save_intent(project_path, intent_data)
-            summary = get_intent_summary(intent_data)
-            return [TextContent(type="text", text=(
-                f"Architectural intent saved to {save_path}\n\n"
-                f"{summary}\n\n"
-                "Guards will now enforce code quality against this declaration. "
-                "If code violates your declared intent, violations will include "
-                "the specific rule you declared."
-            ))]
-
-        elif name == "save_baseline":
-            from guards.structural import save_structural_baseline
-            project_path = arguments["path"]
-            baseline = save_structural_baseline(project_path)
-            return [TextContent(type="text", text=(
-                f"Structural baseline saved with {len(baseline)} files. "
-                f"Future checks will detect growth drift from this snapshot."
-            ))]
-
-        else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        handler = TOOL_HANDLERS.get(name)
+        if not handler:
+            return [TextContent(type="text", text=f"Unknown tool: {name}. Available: {', '.join(sorted(TOOL_HANDLERS))}")]
+        return await handler(registry, arguments)
 
     return server
 
@@ -281,22 +251,21 @@ def format_report(path: str, violations: list[dict], languages: list[str], confi
     lines.append("")
 
     if not violations:
-        lines.append("✓ All guards passed — no violations found.")
+        lines.append("All guards passed.")
         return "\n".join(lines)
 
-    # Group by guard
     by_guard: dict[str, list[dict]] = {}
     for v in violations:
         guard = v.get("guard", "unknown")
         by_guard.setdefault(guard, []).append(v)
 
     total = len(violations)
-    lines.append(f"✗ {total} violation(s) found:")
+    lines.append(f"{total} violation(s) found:")
     lines.append("")
 
     for guard_name, items in sorted(by_guard.items()):
-        lines.append(f"  [{guard_name}] — {len(items)} violation(s)")
-        for v in items[:10]:  # show first 10 per guard
+        lines.append(f"  [{guard_name}] {len(items)} violation(s)")
+        for v in items[:10]:
             file = v.get("file", "?")
             line = v.get("line", 0)
             msg = v.get("message", "")
@@ -312,22 +281,20 @@ def main():
     parser.add_argument("--port", type=int, default=0, help="HTTP SSE port (0 = stdio mode)")
     args = parser.parse_args()
 
-    # Load plugins
+    log = logging.getLogger("codeguards")
     registry = load_plugins()
 
     if not HAS_MCP:
-        print("Error: 'mcp' package not installed. Run: pip install mcp")
+        log.error("'mcp' package not installed. Run: pip install mcp")
         sys.exit(1)
 
     if args.port:
-        # HTTP SSE mode
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
         from starlette.routing import Mount, Route
         import uvicorn
 
         app = create_app(registry)
-
         sse = SseServerTransport("/messages/")
 
         async def handle_sse(request):
@@ -342,11 +309,9 @@ def main():
                 Mount("/messages/", app=sse.handle_post_message),
             ]
         )
-
-        print(f"CodeGuards MCP server listening on port {args.port}")
+        print(f"CodeGuards MCP server listening on port {args.port}", file=sys.stderr)
         uvicorn.run(starlette_app, host="0.0.0.0", port=args.port)
     else:
-        # stdio mode
         app = create_app(registry)
 
         async def run_stdio():

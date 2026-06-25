@@ -150,52 +150,55 @@ def check_missing_tests(project_root: str, config: dict, violations: list[dict])
         return
 
     root = Path(project_root)
-    ext_to_test_paths = {
-        ".rs":  ["tests/", "_test.rs"],
-        ".py":  ["tests/", "_test.py", "test_"],
-        ".js":  ["tests/", ".test.", "__tests__/"],
-        ".ts":  ["tests/", ".test.", ".spec.", "__tests__/"],
+    ext_to_test_exts = {
+        ".rs":  ["_test.rs"],
+        ".py":  ["_test.py", "test_"],
         ".go":  ["_test.go"],
-        ".rb":  ["_test.rb", "spec/"],
+        ".rb":  ["_test.rb"],
     }
-    min_ratio = cfg.get("min_test_ratio", 0.3)  # 30% of source files should have tests
-
-    # Count source files vs test files
+    ext_to_test_dir_patterns = {
+        ".rs":  ["tests/"],
+        ".py":  ["tests/"],
+        ".js":  ["tests/", "__tests__/"],
+        ".ts":  ["tests/", "__tests__/"],
+        ".go":  ["tests/"],
+        ".rb":  ["spec/"],
+    }
+    min_ratio = cfg.get("min_test_ratio", 0.3)
     source_count = 0
     untested = []
+
     for sf in walk_source_files(project_root):
-        sf_str = str(sf)
-        for ext, markers in ext_to_test_paths.items():
-            if sf.suffix != ext:
-                continue
-            source_count += 1
-            basename = sf.stem
-            parent_dir = sf.parent
+        ext = sf.suffix
+        if ext not in ext_to_test_exts:
+            continue
+        source_count += 1
+        basename = sf.stem
+        parent_dir = sf.parent
+        has_test = False
 
-            has_test = False
-            for marker in markers:
-                if marker.endswith("/"):
-                    # Look for test dir in parent or sibling
-                    test_files = list(parent_dir.glob(f"**/{marker}*{basename}*"))
-                    if not test_files:
-                        test_files = list(root.glob(f"{marker}*{basename}*"))
-                    if test_files:
-                        has_test = True
-                        break
-                else:
-                    # Suffix match: foo.rs → foo_test.rs, test_foo.py
-                    candidate = parent_dir / f"{marker.replace('_test.', '')}test_{basename}{ext}" if marker.startswith("test_") else \
-                                parent_dir / f"{basename}{marker}"
-                    if candidate.exists():
-                        has_test = True
-                        break
-                    # Also check glob for __tests__/ variants
-                    if any(list(parent_dir.glob(f"**/*{basename}*{marker.replace('.test.', '*')}*"))):
+        # Check test file extensions: foo_rs → foo_test.rs, test_foo.py
+        for marker in ext_to_test_exts.get(ext, []):
+            if marker.startswith("test_"):
+                candidate = parent_dir / f"{marker}{basename}{ext}"
+            else:
+                candidate = parent_dir / f"{basename}{marker}"
+            if candidate.exists():
+                has_test = True
+                break
+
+        # Check test dir patterns
+        if not has_test:
+            for dir_pattern in ext_to_test_dir_patterns.get(ext, []):
+                test_dir = parent_dir / dir_pattern
+                if test_dir.is_dir():
+                    # Check for any test file with the basename or a matching pattern
+                    if any(test_dir.iterdir()):
                         has_test = True
                         break
 
-            if not has_test:
-                untested.append(sf)
+        if not has_test:
+            untested.append(sf)
 
     if source_count > 3 and untested:
         ratio = (source_count - len(untested)) / source_count

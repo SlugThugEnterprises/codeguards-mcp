@@ -48,45 +48,78 @@ def check_file_length(path: Path, content: str, cfg: dict) -> list[dict]:
 
 
 def check_function_length(path: Path, content: str, cfg: dict) -> list[dict]:
-    """Functions exceeding max lines — too many responsibilities, hard to test."""
+    """Functions exceeding max lines — too many responsibilities, hard to test.
+
+    Supports brace-delimited (Rust, JS, C++) and indentation-delimited (Python).
+    """
     if not cfg.get("enabled", True):
         return []
     max_fn = cfg.get("max", 50)
     violations = []
     lines = content.split("\n")
-    fn_patterns = [
-        r"^\s*(?:pub\s+|export\s+|public\s+)?(?:async\s+|static\s+)?(?:unsafe\s+)?"
-        r"(?:fn|def|function|func|class|impl|struct|trait|enum)\s+",
-    ]
-    fn_re = re.compile("|".join(fn_patterns), re.IGNORECASE)
 
-    i = 0
-    while i < len(lines):
-        if fn_re.match(lines[i]):
-            start = i
-            depth = 0
-            seen_open = False
-            end = start
-            for j in range(start, len(lines)):
-                for c in lines[j]:
-                    if c == '{':
-                        depth += 1
-                        seen_open = True
-                    elif c == '}':
-                        depth -= 1
-                if seen_open and depth == 0:
-                    end = j
+    is_python = path.suffix == ".py"
+
+    if is_python:
+        fn_re = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE)
+        for m in fn_re.finditer(content):
+            start_line = content[:m.start()].count("\n")
+            fn_name = m.group(1)
+            if fn_name.startswith("_"):
+                continue
+            # Find the function block via indentation
+            base_indent = len(m.group()) - len(m.group().lstrip())
+            end_line = start_line + 1
+            for j in range(end_line, len(lines)):
+                stripped = lines[j].strip()
+                if stripped == "":
+                    continue
+                if stripped.startswith("#"):
+                    continue
+                indent = len(lines[j]) - len(lines[j].lstrip())
+                if indent <= base_indent and stripped not in ("", "..."):
                     break
-                if j == len(lines) - 1:
-                    end = j
-            fn_lines = end - start + 1
+                end_line = j
+            fn_lines = end_line - start_line + 1
             if fn_lines > max_fn:
-                func_name = lines[start].strip()[:60]
-                violations.append({"file": str(path), "line": start + 1,
-                    "message": f"Block exceeds {max_fn} lines ({fn_lines}) — split into smaller units",
+                violations.append({"file": str(path), "line": start_line + 1,
+                    "message": f"Function `{fn_name}` exceeds {max_fn} lines ({fn_lines}) — split into smaller units",
                     "guard": "function_length", "principle": "SRP/Modular"})
-            i = end
-        i += 1
+    else:
+        # Brace-delimited: Rust, JS, C++, Go, etc.
+        fn_re = re.compile(
+            r"^\s*(?:pub\s+|export\s+|public\s+)?(?:async\s+|static\s+)?(?:unsafe\s+)?"
+            r"(?:fn|function|func|def)\s+",
+            re.IGNORECASE
+        )
+        i = 0
+        while i < len(lines):
+            if fn_re.match(lines[i]):
+                start = i
+                depth = 0
+                seen_open = False
+                end = start
+                for j in range(start, len(lines)):
+                    for c in lines[j]:
+                        if c == '{':
+                            depth += 1
+                            seen_open = True
+                        elif c == '}':
+                            depth -= 1
+                    if seen_open and depth == 0:
+                        end = j
+                        break
+                    if j == len(lines) - 1:
+                        end = j
+                fn_lines = end - start + 1
+                if fn_lines > max_fn:
+                    func_name = lines[start].strip()[:60]
+                    violations.append({"file": str(path), "line": start + 1,
+                        "message": f"Block exceeds {max_fn} lines ({fn_lines}) — split into smaller units",
+                        "guard": "function_length", "principle": "SRP/Modular"})
+                i = end
+            i += 1
+
     return violations
 
 

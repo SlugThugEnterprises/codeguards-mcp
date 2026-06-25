@@ -91,6 +91,8 @@ def _extract_domain(import_path: str, crate_name: str = "") -> Optional[str]:
     clean = re.sub(r'^(?:crate\:\:)+', '', clean)
     clean = re.sub(r'^\.\.?/', '', clean)
     clean = clean.replace('/', '::')
+    # Python uses dot separators — normalize to ::
+    clean = clean.replace('.', '::')
 
     parts = clean.split('::')
     if not parts:
@@ -104,29 +106,17 @@ def _extract_domain(import_path: str, crate_name: str = "") -> Optional[str]:
             return parts[1].strip().lower()
         return None
 
-    # Known external crates / libraries — tag as external
-    EXTERNALS = {
-        'tokio', 'serde', 'std', 'anyhow', 'thiserror', 'clap', 'reqwest',
-        'axum', 'actix', 'rocket', 'chrono', 'regex', 'log', 'env_logger',
-        'rand', 'uuid', 'sqlx', 'diesel', 'sea_orm', 'redis', 'kafka',
-        'tonic', 'prost', 'tower', 'hyper', 'hyper_util', 'bytes', 'futures',
-        'async_trait', 'dashmap', 'parking_lot', 'crossbeam', 'rayon',
-        'openssl', 'rustls', 'native_tls', 'url', 'mime', 'mime_guess',
-        'base64', 'hex', 'sha2', 'hmac', 'jsonwebtoken', 'oauth2',
-        'reqwest', 'ureq', 'warp', 'tide', 'poem', 'lambda_runtime',
-        'opentelemetry', 'tracing_subscriber', 'metrics', 'lazy_static',
-        'once_cell', 'itertools', 'either', 'cfg_if',
-        # Python
-        'flask', 'django', 'fastapi', 'sqlalchemy', 'pydantic', 'pandas',
-        'numpy', 'requests', 'httpx', 'celery', 'pytest',
-        # JS
-        'express', 'react', 'vue', 'angular', 'next', 'nuxt', 'svelte',
-        'axios', 'lodash', 'moment', 'dayjs', 'prisma', 'typeorm',
-        'zod', 'yup', 'jest', 'vitest', 'mocha', 'cypress',
-    }
+    # Project prefix aliases — match "app.db" → "db", "myproject.models" → "models"
+    PROJECT_PREFIXES = {'app', 'src', 'lib', 'project', 'myapp', 'myproject', 'backend'}
 
-    if first in EXTERNALS or not first.isalpha():
+    known_externals = _EXTERNAL_LIBS()
+    if first in known_externals or not first.isalpha():
         return "external"
+
+    # If first is a generic project prefix, use second component as domain
+    if first in PROJECT_PREFIXES and len(parts) > 1:
+        domain = parts[1].strip().lower()
+        return domain if domain in _DOMAIN_HINTS else domain  # still return it
 
     # Known internal domain hints → use as-is
     if first in _DOMAIN_HINTS:
@@ -140,15 +130,36 @@ def _extract_domain(import_path: str, crate_name: str = "") -> Optional[str]:
     return "external"
 
 
+def _EXTERNAL_LIBS() -> set:
+    """Known external crate/lib names — not project code."""
+    return {
+        'tokio', 'serde', 'std', 'anyhow', 'thiserror', 'clap', 'reqwest',
+        'axum', 'actix', 'rocket', 'chrono', 'regex', 'log', 'env_logger',
+        'rand', 'uuid', 'sqlx', 'diesel', 'sea_orm', 'redis', 'kafka',
+        'tonic', 'prost', 'tower', 'hyper', 'hyper_util', 'bytes', 'futures',
+        'async_trait', 'dashmap', 'parking_lot', 'crossbeam', 'rayon',
+        'openssl', 'rustls', 'native_tls', 'url', 'mime', 'mime_guess',
+        'base64', 'hex', 'sha2', 'hmac', 'config', 'jsonwebtoken', 'oauth2',
+        'reqwest', 'ureq', 'warp', 'tide', 'poem', 'lambda_runtime',
+        'opentelemetry', 'tracing_subscriber', 'metrics', 'lazy_static',
+        'once_cell', 'itertools', 'either', 'cfg_if',
+        'flask', 'django', 'fastapi', 'sqlalchemy', 'pydantic', 'pandas',
+        'numpy', 'requests', 'httpx', 'celery', 'pytest',
+        'express', 'react', 'vue', 'angular', 'next', 'nuxt', 'svelte',
+        'axios', 'lodash', 'moment', 'dayjs', 'prisma', 'typeorm',
+        'zod', 'yup', 'jest', 'vitest', 'mocha', 'cypress',
+    }
+
+
 def analyze_imports(content: str, file_ext: str, crate_name: str = "") -> dict:
     """Parse imports and return structural analysis.
 
     Returns:
         {
-            "domains": {"db": 3, "auth": 1, "external": 5},  # domain → import count
-            "unique_imports": 9,                                 # fan-out
-            "internal_imports": 4,                               # non-external
-            "external_imports": 5,                               # stdlib + packages
+            "domains": {"db": 3, "auth": 1, "external": 5},
+            "unique_imports": 9,
+            "internal_imports": 4,
+            "external_imports": 5,
             "raw_imports": ["crate::db::profiles", ...],
         }
     """
