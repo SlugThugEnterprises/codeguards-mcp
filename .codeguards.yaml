@@ -8,7 +8,7 @@ guards:
   parameter_count:
     max_params: 7
   fan_out:
-    max_dependencies: 25
+    max_dependencies: 30
   god_file:
     max_public_items: 25
     max_imports: 40

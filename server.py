@@ -51,6 +51,21 @@ async def handle_check_project(registry: GuardRegistry, arguments: dict) -> list
     config = load_config(path)
     languages = detect_languages(path)
     violations = run_checks(path, config, registry, languages)
+
+    # Cross-reference against architecture spec
+    from planning import load_architecture
+    arch = load_architecture(path)
+    if arch:
+        modules = arch.get("modules", [])
+        if modules and isinstance(modules, list):
+            violations.append({
+                "file": str(Path(path) / ".planning" / "ARCHITECTURE.md"),
+                "line": 1,
+                "guard": "architecture",
+                "principle": "Architecture",
+                "message": f"Project scope: {len(modules)} module(s): {', '.join(modules)}",
+            })
+
     return [TextContent(type="text", text=format_report(path, violations, languages, config))]
 
 
@@ -210,6 +225,67 @@ async def handle_probe(registry: GuardRegistry, arguments: dict) -> list[TextCon
     return [TextContent(type="text", text="\n".join(questions))]
 
 
+async def handle_plan(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    """Generate a structured project plan from declared intent."""
+    from intent import load_intent
+    from planning import create_architecture, create_plan, get_pending_tasks
+    path = arguments["path"]
+
+    intent = load_intent(path)
+    if not intent:
+        return [TextContent(type="text", text=(
+            "No architectural intent declared. Run `probe` first to help me understand "
+            "what you need, then `declare_intent` to commit to a direction."
+        ))]
+
+    # Create architecture doc
+    arch_path = create_architecture(path, intent)
+
+    # Create project plan
+    plan_path = create_plan(path, intent)
+
+    pending = get_pending_tasks(path)
+    pending_msg = f"\n{pending[0]['id']}: {pending[0]['description']}\n" if pending else ""
+
+    return [TextContent(type="text", text=(
+        f"Planning created:\n"
+        f"- {arch_path}\n"
+        f"- {plan_path}\n"
+        f"\nNext task: {pending_msg}"
+    ))]
+
+
+async def handle_update_task(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    """Mark a task complete or update its status."""
+    from planning import update_task, get_pending_tasks
+    path = arguments["path"]
+    task_id = arguments["task_id"]
+    status = arguments.get("status", "completed")
+
+    if update_task(path, task_id, status):
+        pending = get_pending_tasks(path)
+        msg = f"Task {task_id} marked as {status}."
+        if pending:
+            msg += f"\nNext pending task: {pending[0]['id']} — {pending[0]['description']}"
+        else:
+            msg += "\nAll tasks complete. Run `plan` to generate the next phase."
+        return [TextContent(type="text", text=msg)]
+    return [TextContent(type="text", text=f"Task {task_id} not found in plan.")]
+
+
+async def handle_list_tasks(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    """Show pending tasks."""
+    from planning import get_pending_tasks
+    path = arguments["path"]
+    pending = get_pending_tasks(path)
+    if not pending:
+        return [TextContent(type="text", text="No pending tasks. All caught up!")]
+    lines = [f"{len(pending)} pending task(s):\n"]
+    for t in pending:
+        lines.append(f"  [ ] {t.get('id', '?')}: {t.get('description', '?')}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
 # Dispatch table — adding a tool = one function + one dict entry
 TOOL_HANDLERS: dict[str, Callable] = {
     "check_project": handle_check_project,
@@ -219,6 +295,9 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "declare_intent": handle_declare_intent,
     "save_baseline": handle_save_baseline,
     "probe": handle_probe,
+    "plan": handle_plan,
+    "update_task": handle_update_task,
+    "list_tasks": handle_list_tasks,
 }
 
 TOOL_DEFINITIONS: list[Tool] = [
@@ -289,6 +368,29 @@ TOOL_DEFINITIONS: list[Tool] = [
             "description": {"type": "string", "description": "What the user wants to build (plain language)"},
             "competitor": {"type": "string", "description": "Optional: a product or tool the user mentioned as reference"},
         }, "required": ["description"]},
+    ),
+    Tool(
+        name="plan",
+        description="Generate structured project plan from declared intent. Creates .planning/ARCHITECTURE.md and .planning/PROJECT_PLAN.md with machine-enforceable YAML frontmatter.",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Project root path"},
+        }, "required": ["path"]},
+    ),
+    Tool(
+        name="update_task",
+        description="Mark a task as completed or update its status.",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Project root path"},
+            "task_id": {"type": "string", "description": "Task ID (e.g. T1, T2)"},
+            "status": {"type": "string", "description": "Status: completed, pending, in_progress"},
+        }, "required": ["path", "task_id"]},
+    ),
+    Tool(
+        name="list_tasks",
+        description="Show pending tasks from the project plan.",
+        inputSchema={"type": "object", "properties": {
+            "path": {"type": "string", "description": "Project root path"},
+        }, "required": ["path"]},
     ),
 ]
 

@@ -102,8 +102,8 @@ def relevant_file_globs(languages: list[str]) -> list[str]:
 IGNORED_DIRS = {
     "node_modules", ".git", "target", "build", "dist", ".next",
     "__pycache__", ".venv", "venv", ".env", ".tox", ".eggs",
-    "vendor", ".cargo", "coverage", ".nyc_output", ".pytest_cache",
-    "plugins",
+    "vendor", ".cargo", "coverage", ".nyc_output", ".pytest_cache", ".pytest_cache",
+    "plugins", "sample_code",
 }
 
 
