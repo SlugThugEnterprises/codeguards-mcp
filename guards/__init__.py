@@ -118,7 +118,77 @@ def run_checks(
                     "guard": "error",
                 })
 
+    # Project-level checks
+    check_missing_tests(project_root, config, violations)
+
     return violations
+
+
+def check_missing_tests(project_root: str, config: dict, violations: list[dict]):
+    """AI rarely writes tests — check that source modules have test files."""
+    cfg = config.get("guards", {}).get("missing_tests", {})
+    if not cfg.get("enabled", True):
+        return
+
+    root = Path(project_root)
+    ext_to_test_paths = {
+        ".rs":  ["tests/", "_test.rs"],
+        ".py":  ["tests/", "_test.py", "test_"],
+        ".js":  ["tests/", ".test.", "__tests__/"],
+        ".ts":  ["tests/", ".test.", ".spec.", "__tests__/"],
+        ".go":  ["_test.go"],
+        ".rb":  ["_test.rb", "spec/"],
+    }
+    min_ratio = cfg.get("min_test_ratio", 0.3)  # 30% of source files should have tests
+
+    # Count source files vs test files
+    source_count = 0
+    untested = []
+    for sf in walk_source_files(project_root):
+        sf_str = str(sf)
+        for ext, markers in ext_to_test_paths.items():
+            if sf.suffix != ext:
+                continue
+            source_count += 1
+            basename = sf.stem
+            parent_dir = sf.parent
+
+            has_test = False
+            for marker in markers:
+                if marker.endswith("/"):
+                    # Look for test dir in parent or sibling
+                    test_files = list(parent_dir.glob(f"**/{marker}*{basename}*"))
+                    if not test_files:
+                        test_files = list(root.glob(f"{marker}*{basename}*"))
+                    if test_files:
+                        has_test = True
+                        break
+                else:
+                    # Suffix match: foo.rs → foo_test.rs, test_foo.py
+                    candidate = parent_dir / f"{marker.replace('_test.', '')}test_{basename}{ext}" if marker.startswith("test_") else \
+                                parent_dir / f"{basename}{marker}"
+                    if candidate.exists():
+                        has_test = True
+                        break
+                    # Also check glob for __tests__/ variants
+                    if any(parent_dir.glob(f"**/{marker.replace('.test.', '*')}{'*'}*{basename}*")):
+                        has_test = True
+                        break
+
+            if not has_test:
+                untested.append(sf)
+
+    if source_count > 3 and untested:
+        ratio = (source_count - len(untested)) / source_count
+        if ratio < min_ratio:
+            violations.append({
+                "file": "",
+                "line": 0,
+                "message": f"Test coverage: {len(untested)}/{source_count} source files have no matching test ({ratio:.0%}, target {min_ratio:.0%})",
+                "guard": "missing_tests",
+                "principle": "Testing",
+                "untested_files": [str(u.relative_to(root)) for u in untested[:20]],
+            })
 
 
 _GENERIC_CHECKS = generic.ALL_GENERIC_CHECKS

@@ -48,6 +48,11 @@ DEFAULTS = {
         "glob_imports": {
             "enabled": True,
         },
+        "hardcoded_values": {"enabled": True},
+        "missing_docs": {"enabled": True},
+        "swallowed_errors": {"enabled": True},
+        "no_stubs": {"enabled": True},
+        "missing_tests": {"enabled": True, "min_test_ratio": 0.3},
     },
 }
 

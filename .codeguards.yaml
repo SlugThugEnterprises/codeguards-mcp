@@ -72,3 +72,21 @@ guards:
   action_items:
     enabled: true
     require_issue: true
+
+  hardcoded_values:
+    enabled: true
+
+  missing_docs:
+    enabled: true
+
+  # ── Error Handling ──
+  swallowed_errors:
+    enabled: true
+
+  no_stubs:
+    enabled: true
+
+  # ── Testing ──
+  missing_tests:
+    enabled: true
+    min_test_ratio: 0.3

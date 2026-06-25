@@ -424,6 +424,164 @@ def check_action_items(path: Path, content: str, cfg: dict) -> list[dict]:
 
 
 # ──────────────────────────────────────────────
+# Error Handling — no swallowed errors, error context
+# ──────────────────────────────────────────────
+
+def check_swallowed_errors(path: Path, content: str, cfg: dict) -> list[dict]:
+    """Empty catch/except blocks — errors eaten silently, nightmare to debug."""
+    if not cfg.get("enabled", True):
+        return []
+    violations = []
+
+    patterns = [
+        # Rust: catch-all with empty body
+        (r"(?s)_\s*=>\s*\{\s*\}", "Empty match arm — silently drops error, handle or propagate it"),
+        (r"(?s)Err\(\s*_\s*\)\s*=>\s*\{\s*\}", "Swallowed Err — handle the error or add context to the return"),
+        # Python: bare except or empty except block
+        (r"except\s*:\s*pass", "Bare `except: pass` — swallows all errors including KeyboardInterrupt"),
+        (r"(?s)except\s+Exception\s*:\s*pass", "`except Exception: pass` — silently drops real errors"),
+        (r"(?s)except\s+\w+\s*:\s*pass", "Empty except block — at minimum log the error"),
+        # JS/TS: empty catch
+        (r"(?s)catch\s*\(\s*\w*\s*\)\s*\{\s*\}", "Empty catch block — silently swallows error"),
+        (r"(?s)catch\s*\{\s*\}", "Empty catch block — silently swallows error"),
+        (r"(?s)\.catch\(\s*\(\s*\)\s*=>\s*\{\s*\}\s*\)", "Empty promise catch — swallows async errors"),
+    ]
+
+    for pat, msg in patterns:
+        for m in re.compile(pat).finditer(content):
+            violations.append({"file": str(path),
+                "line": content[:m.start()].count("\n") + 1,
+                "message": f"{m.group()[:40].strip()} — {msg}",
+                "guard": "swallowed_errors", "principle": "Error Handling"})
+    return violations
+
+
+def check_no_stubs(path: Path, content: str, cfg: dict) -> list[dict]:
+    """No placeholder/stub implementations in production code."""
+    if not cfg.get("enabled", True):
+        return []
+    violations = []
+
+    patterns = [
+        # Rust
+        (r"\btodo!\s*\(", "stub `todo!()` in production code"),
+        (r"\bunimplemented!\s*\(", "stub `unimplemented!()` in production code"),
+        (r"\bunreachable!\s*\(\s*\"(?:not implemented|TODO|stub)", "stub `unreachable!()` with placeholder message"),
+        # Python
+        (r"^\s*pass\s*#\s*(?:TODO|FIXME|stub|placeholder)", "Stub pass with TODO — implement or remove"),
+        (r"\braise\s+NotImplementedError\b", "Stub `raise NotImplementedError` — implement before shipping"),
+        # JS/TS
+        (r"\bthrow\s+new\s+Error\s*\(\s*[\"'](?:not\s+implemented|TODO|stub)", "Stub error — implement before shipping"),
+        # Generic
+        (r"(?i)#\s*FIXME.*(?:stub|placeholder|replace\s+me)", "Stub comment — implement or remove"),
+    ]
+
+    for pat, msg in patterns:
+        for m in re.compile(pat, re.IGNORECASE).finditer(content):
+            line = content[:m.start()].count("\n") + 1
+            line_text = content.split("\n")[line - 1].strip()
+            if line_text.startswith("//") or line_text.startswith("#") or line_text.startswith("///"):
+                # Only flag comments that explicitly say "stub"/"placeholder"
+                if not any(w in line_text.lower() for w in ("stub", "placeholder", "replace me")):
+                    continue
+            violations.append({"file": str(path), "line": line,
+                "message": f"{m.group()[:40].strip()} — {msg}",
+                "guard": "no_stubs", "principle": "Testing"})
+    return violations
+
+
+def check_hardcoded_values(path: Path, content: str, cfg: dict) -> list[dict]:
+    """Configuration values as raw literals — should come from config/env."""
+    if not cfg.get("enabled", True):
+        return []
+    violations = []
+
+    patterns = [
+        # URLs that look hardcoded
+        (r"""(?<!\w)["'](https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0)[^"']{8,})['"]""",
+         "Hardcoded URL — extract to config or environment variable"),
+        # IP addresses (not localhost)
+        (r"""(?<!\w)["']((?!127\.|0\.0\.|::1|192\.168\.|10\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})['"]""",
+         "Hardcoded IP address — extract to config"),
+        # Raw port numbers that look like configuration
+        (r"""(?i)(?:\bport\s*[=:]\s*|:\s*)(\d{4,5})\b""",
+         "Hardcoded port — extract to config constant"),
+        # Timeout values in seconds (magic numbers that are config)
+        (r"""(?i)(?:\btimeout\s*[=:]\s*|\btimeout_secs?\s*[=:]\s*)(\d{2,})\b""",
+         "Hardcoded timeout — extract to config constant"),
+    ]
+
+    for pat, msg in patterns:
+        for m in re.compile(pat, re.MULTILINE).finditer(content):
+            line = content[:m.start()].count("\n") + 1
+            line_text = content.split("\n")[line - 1] if line <= len(content.split("\n")) else ""
+            # Don't flag in const/static/import lines
+            if re.match(r"^\s*(?:const|static|let\s+\w+:|import|use)\s", line_text):
+                continue
+            violations.append({"file": str(path), "line": line,
+                "message": f"Hardcoded config value `{m.group(1)[:30]}` — {msg}",
+                "guard": "hardcoded_values", "principle": "Maintainability"})
+    return violations
+
+
+def check_missing_docs(path: Path, content: str, cfg: dict) -> list[dict]:
+    """Public items without docstrings — poor maintainability signal."""
+    if not cfg.get("enabled", True):
+        return []
+    violations = []
+    lines = content.split("\n")
+
+    # Rust: pub fn/pub struct/pub enum without /// on preceding line
+    rust_pub = re.compile(r"^\s*pub\s+(?:async\s+)?(?:unsafe\s+)?(fn|struct|enum|trait|mod)\s+(\w+)")
+    for i, line in enumerate(lines):
+        m = rust_pub.match(line)
+        if not m:
+            continue
+        item_type, item_name = m.group(1), m.group(2)
+        # Check if any of the 3 preceding lines (allowing attributes) have a doc comment
+        has_doc = False
+        for j in range(max(0, i - 5), i):
+            if lines[j].strip().startswith("///") or lines[j].strip().startswith("#[doc"):
+                has_doc = True
+                break
+            # Allow attributes like #[derive(...)], #[cfg(...)]
+            if lines[j].strip().startswith("#[") and not lines[j].strip().startswith("#[doc"):
+                continue
+            if lines[j].strip() == "":
+                continue
+            break  # non-attribute, non-blank, non-doc line means no doc comment
+        if not has_doc and item_name not in ("new", "default", "run", "main"):
+            violations.append({"file": str(path), "line": i + 1,
+                "message": f"Public {item_type} `{item_name}` has no doc comment — add /// documentation",
+                "guard": "missing_docs", "principle": "Maintainability"})
+
+    # Python: def or class without """ docstring on next non-blank line
+    if path.suffix == ".py":
+        py_pub = re.compile(r"^\s*def\s+(\w+)|^\s*class\s+(\w+)")
+        for i, line in enumerate(lines):
+            m = py_pub.match(line)
+            if not m:
+                continue
+            func_name = m.group(1) or m.group(2)
+            if func_name and func_name.startswith("_"):
+                continue  # private
+            # Check next non-blank line for """
+            has_doc = False
+            for j in range(i + 1, min(i + 5, len(lines))):
+                if lines[j].strip() == "":
+                    continue
+                if lines[j].strip().startswith('"""') or lines[j].strip().startswith("'''"):
+                    has_doc = True
+                break
+            if not has_doc:
+                violations.append({"file": str(path), "line": i + 1,
+                    "message": f"Public function `{func_name}` has no docstring — add documentation",
+                    "guard": "missing_docs", "principle": "Maintainability"})
+
+    return violations
+
+
+# ──────────────────────────────────────────────
 # All generic guards — registered in __init__.py
 # ──────────────────────────────────────────────
 
@@ -442,4 +600,9 @@ ALL_GENERIC_CHECKS = {
     "parameter_count": check_parameter_count,
     "credentials": check_credentials,
     "action_items": check_action_items,
+    "swallowed_errors": check_swallowed_errors,
+    "no_stubs": check_no_stubs,
+    "hardcoded_values": check_hardcoded_values,
+    "missing_docs": check_missing_docs,
+
 }
