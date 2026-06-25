@@ -392,21 +392,25 @@ def check_deep_nesting(path: Path, content: str, cfg: dict) -> list[dict]:
     for style, re_obj in nest_counters.items():
         for i, line in enumerate(lines):
             stripped = line.strip()
+            # Skip empty and comment lines
             if stripped == "" or stripped.startswith("//") or stripped.startswith("#"):
                 continue
 
+            # If we entered params on a previous line, we're still in them
+            if paren_depth > 0:
+                in_params = True
+
             # Track paren depth to skip function signature continuations
-            # This handles multi-line def/function/fn signatures
             for c in stripped:
                 if c == '(':
                     paren_depth += 1
-                    if re.match(r"^\s*(?:fn|def|function|func)\b", stripped, re.IGNORECASE):
-                        in_params = True
+                    in_params = True
                 elif c == ')':
                     paren_depth -= 1
-                    if paren_depth <= 0:
-                        in_params = False
-                        paren_depth = 0
+            # Only exit params when paren depth returns to zero
+            if paren_depth <= 0:
+                in_params = False
+                paren_depth = 0
 
             if in_params:
                 continue  # Not real nesting — parameter list alignment

@@ -216,23 +216,30 @@ def check_missing_tests(project_root: str, config: dict, violations: list[dict])
 
 
 def enrich_with_fixes(project_root: str, violations: list[dict]):
-    """Post-process: add fix suggestions and intent cross-reference to violations."""
+    """Post-process: filter false positives, add fix suggestions, cross-reference intent."""
     from intent import load_intent, check_intent_violation
-
     intent = load_intent(project_root)
 
-    for v in violations:
+    # Filter false positives — modify list in-place
+    for v in list(violations):
         guard = v.get("guard", "")
-
-        # Filter self-referential violations
         f = v.get("file", "")
-        if f.endswith((".py", ".rs")) and v.get("line", 0):
-            try:
-                line_text = (Path(f).read_text().split("\n")[v["line"] - 1]) if Path(f).exists() else ""
-                if 'r"' in line_text or "r'" in line_text:
-                    continue
-            except (IndexError, OSError):
-                pass
+
+        # Guard definition files contain regex patterns that trigger their own checks
+        if any(x in f for x in ("generic.py", "structural.py")) and guard in (
+            "no_stubs", "swallowed_errors", "unsafe_patterns"
+        ):
+            violations.remove(v)
+            continue
+
+        # Test files contain intentional patterns that would be false positives
+        fp = Path(f)
+        if any(p == "tests" for p in fp.parts) or fp.name.startswith("test_"):
+            if guard in ("no_stubs", "swallowed_errors", "unsafe_patterns",
+                          "credentials", "hardcoded_values", "responsibility_clusters",
+                          "glob_imports"):
+                violations.remove(v)
+                continue
 
         # Cross-reference against declared intent
         if intent and v.get("file"):
