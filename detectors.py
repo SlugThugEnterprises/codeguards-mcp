@@ -102,12 +102,20 @@ def relevant_file_globs(languages: list[str]) -> list[str]:
 IGNORED_DIRS = {
     "node_modules", ".git", "target", "build", "dist", ".next",
     "__pycache__", ".venv", "venv", ".env", ".tox", ".eggs",
-    "vendor", ".cargo", "coverage", ".nyc_output",
+    "vendor", ".cargo", "coverage", ".nyc_output", ".pytest_cache",
+    "plugins",
 }
 
 
 def walk_source_files(project_root: str, extensions: set[str] | None = None) -> list[Path]:
-    """Walk source files in a project, skipping ignored dirs and binaries."""
+    """Walk source files in a project, skipping ignored dirs and non-code files."""
+    if extensions is None:
+        # Only process common source code extensions
+        extensions = {".py", ".rs", ".js", ".ts", ".jsx", ".tsx", ".go", ".rb",
+                       ".java", ".cs", ".cpp", ".c", ".h", ".hpp", ".ex", ".exs",
+                       ".php", ".vue", ".svelte", ".swift", ".kt", ".scala", ".elm",
+                       ".hs", ".ml", ".mli", ".r", ".lua", ".sh", ".bash", ".zsh",
+                       ".sql"}
     root = Path(project_root)
     files = []
     for f in root.rglob("*"):
