@@ -26,7 +26,7 @@ class GuardRegistry:
         description: str = "",
         file_extensions: set[str] | None = None,
     ):
-        """Register a guard check function."""
+        """Register a guard check function from a plugin."""
         self._guards.append({
             "name": name,
             "check_fn": check_fn,
@@ -37,6 +37,7 @@ class GuardRegistry:
 
     @property
     def guards(self) -> list[dict]:
+        """All registered guards."""
         return list(self._guards)
 
 
@@ -59,7 +60,8 @@ def load_plugins() -> GuardRegistry:
                     if hasattr(mod, "register"):
                         mod.register(registry)
             except Exception as e:
-                print(f"Warning: failed to load plugin {f.name}: {e}")
+                import logging as _log
+                _log.getLogger("codeguards.plugins").warning("failed to load plugin %s: %s", f.name, e)
 
     return registry
 
@@ -70,7 +72,7 @@ def run_checks(
     registry: GuardRegistry,
     languages: list[str] | None = None,
 ) -> list[dict]:
-    """Run all applicable guards against a project."""
+    """Run all applicable guards against a project — generic, structural, plugin, project-level."""
     if languages is None:
         languages = detect_languages(project_root)
 

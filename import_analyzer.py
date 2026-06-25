@@ -87,14 +87,14 @@ def _extract_domain(import_path: str, crate_name: str = "") -> Optional[str]:
         return None
 
     # Normalize: strip leading dots, slashes, crate::
-    clean = import_path.strip()
-    clean = re.sub(r'^(?:crate\:\:)+', '', clean)
-    clean = re.sub(r'^\.\.?/', '', clean)
-    clean = clean.replace('/', '::')
+    normalized = import_path.strip()
+    normalized = re.sub(r'^(?:crate\:\:)+', '', normalized)
+    normalized = re.sub(r'^\.\.?/', '', normalized)
+    normalized = normalized.replace('/', '::')
     # Python uses dot separators — normalize to ::
-    clean = clean.replace('.', '::')
+    normalized = normalized.replace('.', '::')
 
-    parts = clean.split('::')
+    parts = normalized.split('::')
     if not parts:
         return None
 

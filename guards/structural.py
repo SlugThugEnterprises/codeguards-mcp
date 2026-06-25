@@ -239,10 +239,10 @@ def check_growth_drift(project_root: str) -> list[dict]:
 def check_cosmetic_fix(
     project_root: str, violations: list[dict]
 ) -> list[dict]:
-    """After a round of fixes, check if structural change actually happened.
-
-    If the dependency graph didn't change but violations disappeared,
-    the fix was cosmetic (split files without changing architecture).
+    """Detect cosmetic refactors — shape changed but structure did not.
+    
+    If the dependency graph / responsibility clusters stayed the same
+    but line counts improved, the fix was superficial and should be rejected.
     """
     prev = _load_baseline(project_root)
     if not prev:

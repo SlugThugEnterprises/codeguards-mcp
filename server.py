@@ -309,7 +309,7 @@ def main():
                 Mount("/messages/", app=sse.handle_post_message),
             ]
         )
-        print(f"CodeGuards MCP server listening on port {args.port}", file=sys.stderr)
+        log.info("CodeGuards MCP server listening on port %d", args.port)
         uvicorn.run(starlette_app, host="0.0.0.0", port=args.port)
     else:
         app = create_app(registry)

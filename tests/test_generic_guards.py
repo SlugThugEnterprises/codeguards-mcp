@@ -38,7 +38,7 @@ def test_file_length_violation(tmp_path):
 
 
 def test_file_length_test_file(tmp_path):
-    """Test files should use max_test threshold."""
+    """Test files use max_test threshold (not max_prod)."""
     f = tmp_path / "tests" / "mod.rs"
     f.parent.mkdir()
     f.write_text("\n".join(f"line {i}" for i in range(600)))
