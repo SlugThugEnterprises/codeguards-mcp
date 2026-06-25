@@ -37,7 +37,17 @@ except ImportError:
 # ──────────────────────────────────────────────
 
 async def handle_check_project(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    from intent import has_intent
     path = arguments["path"]
+    if not has_intent(path):
+        return [TextContent(type="text", text=(
+            "I don't know what you're building yet.\n\n"
+            "Before I can check code, I need to understand the goal. "
+            "Run `probe` first to help me ask the right questions — "
+            "then `declare_intent` to commit to a direction.\n\n"
+            "Writing code without understanding what you need is "
+            "how 129 files of wrong architecture happen."
+        ))]
     config = load_config(path)
     languages = detect_languages(path)
     violations = run_checks(path, config, registry, languages)
@@ -150,6 +160,56 @@ async def handle_save_baseline(registry: GuardRegistry, arguments: dict) -> list
     ))]
 
 
+async def handle_probe(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
+    """Help the AI figure out the right questions before writing code."""
+    description = arguments.get("description", "")
+    competitor = arguments.get("competitor", "")
+
+    questions = []
+    questions.append("# Probe: What to understand before writing a line of code\n")
+
+    if competitor:
+        questions.append(f"## Research: {competitor}")
+        questions.append(
+            f"You mentioned something like {competitor}. I don't know that product inside out — "
+            f"but here's what I need to understand from you before I can help design something:\n"
+        )
+
+    questions.append("## 1. The Real Goal")
+    questions.append("- What problem are you trying to solve? (describe it without mentioning technology)")
+    questions.append("- Who has this problem? Just you? A team? Customers?")
+    questions.append("- Is this for personal use, a product you'll sell, or just to see if it can be done?")
+
+    questions.append("")
+    questions.append("## 2. What Exists vs What's Different")
+    questions.append("- What do you use now, and what does it do wrong?")
+    questions.append("- What's the thing that makes your idea different?")
+    questions.append("- If you could change ONE thing about existing tools, what would it be?")
+
+    questions.append("")
+    questions.append("## 3. Scope")
+    questions.append("- Are you prototyping (prove it works) or building for production (ship it)?")
+    questions.append("- How much time do you want to spend on this?")
+    questions.append("- What does 'done' look like — when would you call this a success?")
+
+    questions.append("")
+    questions.append("## 4. Preferences (no right answers)")
+    questions.append("- Do you prefer tools that are established and boring, or new and cutting edge?")
+    questions.append("- Do you care about how the code looks, or just that it works?")
+    questions.append("- Do you want something you can maintain yourself, or set-and-forget?")
+    questions.append("- Is there a language or technology you specifically want to use — or avoid?")
+
+    if competitor:
+        questions.append("")
+        questions.append("## Suggested next step")
+        questions.append(
+            f"I can look up what {competitor} actually offers and compare options "
+            f"once you answer a few of these. Want me to research it?"
+        )
+
+    return [TextContent(type="text", text="\n".join(questions))]
+
+
 # Dispatch table — adding a tool = one function + one dict entry
 TOOL_HANDLERS: dict[str, Callable] = {
     "check_project": handle_check_project,
@@ -158,6 +218,7 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "list_guards": handle_list_guards,
     "declare_intent": handle_declare_intent,
     "save_baseline": handle_save_baseline,
+    "probe": handle_probe,
 }
 
 TOOL_DEFINITIONS: list[Tool] = [
@@ -220,6 +281,14 @@ TOOL_DEFINITIONS: list[Tool] = [
         inputSchema={"type": "object", "properties": {
             "path": {"type": "string", "description": "Path to the project root"},
         }, "required": ["path"]},
+    ),
+    Tool(
+        name="probe",
+        description="Before writing code: ask probing questions to understand what the user actually needs. No tech questions — focus on goal, problem, scope, and preferences. Call this before declare_intent when starting something new.",
+        inputSchema={"type": "object", "properties": {
+            "description": {"type": "string", "description": "What the user wants to build (plain language)"},
+            "competitor": {"type": "string", "description": "Optional: a product or tool the user mentioned as reference"},
+        }, "required": ["description"]},
     ),
 ]
 
