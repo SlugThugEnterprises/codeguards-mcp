@@ -43,7 +43,7 @@ def check_file_length(path: Path, content: str, cfg: dict) -> list[dict]:
         return [{"file": str(path), "line": 1,
                  "message": f"File exceeds {max_lines} lines ({line_count}) — split into smaller modules (SRP)",
                  "guard": "file_length", "principle": "SOC",
-                 "fix": fixes.fix_file_length(path, content, line_count, max_lines)}]
+                 "fix": fix_file_length(path, content, line_count, max_lines)}]
     return []
 
 

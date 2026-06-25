@@ -190,7 +190,7 @@ def check_missing_tests(project_root: str, config: dict, violations: list[dict])
                         has_test = True
                         break
                     # Also check glob for __tests__/ variants
-                    if any(parent_dir.glob(f"**/{marker.replace('.test.', '*')}{'*'}*{basename}*")):
+                    if any(list(parent_dir.glob(f"**/*{basename}*{marker.replace('.test.', '*')}*"))):
                         has_test = True
                         break
 
