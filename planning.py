@@ -4,10 +4,11 @@ Creates .planning/ARCHITECTURE.md and .planning/PROJECT_PLAN.md
 with YAML frontmatter that CodeGuards tools can enforce against.
 """
 
-import os
 import re
-from datetime import datetime
 from pathlib import Path
+from string import Template
+
+import yaml
 
 
 PLANNING_DIR = ".planning"
@@ -17,33 +18,40 @@ PLAN_FILE = "PROJECT_PLAN.md"
 
 # ── Architecture ──
 
-ARCHITECTURE_TEMPLATE = """---
-# Machine-readable architecture spec
-# CodeGuards tools use this to enforce module boundaries and dependencies
-modules: {}
-layers: {}
-allowed_dependencies: {}
-enforce: []
----
+ARCHITECTURE_TEMPLATE = Template("""## Architecture Overview
 
-# Architecture Overview
-
-{overview}
+$overview
 
 ## Modules
 
-{module_details}
+$module_details
 
 ## Dependencies
 
-{dependency_details}
+$dependency_details
 
 ## Enforcement Rules
 
 - Modules must not import from modules outside their declared dependency list
 - Each module's directory must be under the declared path
 - Code in each module must pass its specific enforce checks
-"""
+""")
+
+
+def _split_frontmatter(content: str) -> tuple[dict, str]:
+    """Split a document into (frontmatter_dict, body). Frontmatter is the YAML
+    block between the first pair of ``---`` markers. Returns ({}, content) if
+    no frontmatter present."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", content, re.DOTALL)
+    if not match:
+        return {}, content
+    fm_raw = match.group(1)
+    try:
+        fm = yaml.safe_load(fm_raw) or {}
+    except yaml.YAMLError:
+        fm = {}
+    body = content[match.end():]
+    return (fm, body)
 
 
 def create_architecture(path: str, intent: dict) -> str:
@@ -54,57 +62,51 @@ def create_architecture(path: str, intent: dict) -> str:
     modules = intent.get("modules", [])
     global_rules = intent.get("global", {})
 
-    # Build machine-readable frontmatter
-    module_map = {}
-    layer_map = {}
-    deps_map = {}
-
-    for m in modules:
-        name = m.get("name", "unknown")
-        mod_path = m.get("path", "")
-        module_map[name] = {
-            "dir": mod_path,
-            "resp": m.get("responsibility", ""),
-            "deps": [],
-        }
-        layer_map[name] = {"deps": []}
-
-    machine_yaml = f"modules: {list(module_map.keys())}\n"
-    machine_yaml += f"layers: {list(layer_map.keys())}\n"
-    machine_yaml += f"enforce: {list(global_rules.keys())}\n"
-
-    # Human-readable overview
-    overview = intent.get("description", "No description provided.")
-
-    module_details = []
+    # Build machine-readable frontmatter via proper YAML.
+    allowed_deps: dict[str, list[str]] = {}
     for m in modules:
         name = m.get("name", "?")
-        resp = m.get("responsibility", "?")
-        mod_path = m.get("path", "?")
-        mod_lines = [
-            f"### {name}",
-            f"- **Path:** `{mod_path}`",
-            f"- **Responsibility:** {resp}",
-            f"- **Error strategy:** {m.get('error_strategy', 'not declared')}",
-            f"- **Logging:** {m.get('logging', 'not declared')}",
-            f"- **Testing:** {m.get('testing', 'not declared')}",
-        ]
-        module_details.append("\n".join(mod_lines))
+        deps = m.get("dependencies", []) or []
+        if isinstance(deps, str):
+            deps = [d.strip() for d in deps.split(",") if d.strip()]
+        allowed_deps[name] = deps
 
-    dep_details = []
-    for key, val in global_rules.items():
-        dep_details.append(f"- **{key}:** {val}")
+    fm = {
+        "modules": [m.get("name", "?") for m in modules],
+        "layers": [m.get("name", "?") for m in modules],
+        "allowed_dependencies": allowed_deps,
+        "enforce": list(global_rules.keys()),
+    }
+
+    # Build human-readable body via string substitution.
+    overview = intent.get("description", "No description provided.")
+    module_details = []
+    for m in modules:
+        module_details.append(
+            f"### {m.get('name', '?')}\n"
+            f"- **Path:** `{m.get('path', '?')}`\n"
+            f"- **Responsibility:** {m.get('responsibility', '?')}\n"
+            f"- **Error strategy:** {m.get('error_strategy', 'not declared')}\n"
+            f"- **Logging:** {m.get('logging', 'not declared')}\n"
+            f"- **Testing:** {m.get('testing', 'not declared')}"
+        )
+    dep_details = [f"- **{k}:** {v}" for k, v in global_rules.items()]
+
+    body = ARCHITECTURE_TEMPLATE.substitute(
+        overview=overview,
+        module_details="\n\n".join(module_details) if module_details
+                       else "No modules declared.",
+        dependency_details="\n".join(dep_details) if dep_details
+                           else "No global rules declared.",
+    )
 
     arch_path = plan_dir / ARCHITECTURE_FILE
-    content = ARCHITECTURE_TEMPLATE.format(
-        overview=overview,
-        module_details="\n\n".join(module_details) if module_details else "No modules declared.",
-        dependency_details="\n".join(dep_details) if dep_details else "No global rules declared.",
-    )
-    # Inject machine frontmatter as YAML block
-    content = f"---\n{machine_yaml}---\n\n" + content.split("---", 2)[-1].strip()
-
-    arch_path.write_text(content)
+    with open(arch_path, "w") as f:
+        f.write("---\n")
+        yaml.safe_dump(fm, f, default_flow_style=False, sort_keys=False,
+                       allow_unicode=True)
+        f.write("---\n\n")
+        f.write(body)
     return str(arch_path)
 
 
@@ -114,59 +116,22 @@ def load_architecture(path: str) -> dict | None:
     if not arch_file.exists():
         return None
     content = arch_file.read_text()
-
-    # Extract YAML frontmatter (between --- markers)
-    match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-    if not match:
-        return None
-
-    yaml_block = match.group(1)
-    result = {}
-    for line in yaml_block.strip().split("\n"):
-        if ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        key = key.strip()
-        value = value.strip()
-        if value.startswith("[") and value.endswith("]"):
-            value = [v.strip().strip("'\"") for v in value.strip("[]").split(",") if v.strip()]
-        result[key] = value
-    return result
+    fm, _ = _split_frontmatter(content)
+    return fm or None
 
 
 # ── Project Plan ──
 
-PLAN_TEMPLATE = """---
-# Machine-readable project plan
-# Phases and tasks that CodeGuards tools can validate and check off
-phases: []
----
+PLAN_BODY_TEMPLATE = Template("""# Project Plan
 
-# Project Plan
-
-{plan_body}
+$plan_body
 
 ---
 
 ## Task Progress
 
-{tasks_body}
-"""
-
-PHASE_TEMPLATE = """
-## Phase {id}: {goal}
-
-**Status:** {status}  
-**Est. effort:** {effort}
-
-{description}
-
-| Task | File/Scope | Status |
-|------|-----------|--------|
-{tasks_table}
-
-{tasks_detail}
-"""
+$completed_count/$total_count tasks completed
+""")
 
 
 def create_plan(path: str, intent: dict, phases: list[dict] | None = None) -> str:
@@ -174,130 +139,166 @@ def create_plan(path: str, intent: dict, phases: list[dict] | None = None) -> st
     plan_dir = Path(path) / PLANNING_DIR
     plan_dir.mkdir(parents=True, exist_ok=True)
 
-    if not phases:
+    if phases is None:
         modules = intent.get("modules", [])
-        # Auto-generate phases from declared modules
-        phases = [{
-            "id": "01",
-            "goal": f"Implement {m.get('name', '?')} module",
-            "status": "pending",
-            "effort": "medium",
-            "description": f"Build the {m.get('name', '?')} module: {m.get('responsibility', '?')}",
-            "tasks": [
-                {
-                    "id": f"T{i+1}",
-                    "description": f"Create {m.get('name', '?')} data structures",
-                    "file": m.get('path', ''),
-                    "checks": ["no_unwrap"],
-                    "status": "pending",
-                },
-                {
-                    "id": f"T{i+2}",
-                    "description": f"Implement {m.get('name', '?')} business logic",
-                    "file": m.get('path', ''),
-                    "checks": ["file_length", "function_length"],
-                    "status": "pending",
-                },
-                {
-                    "id": f"T{i+3}",
-                    "description": f"Write {m.get('name', '?')} tests",
-                    "file": m.get('path', ''),
-                    "checks": ["tracing_instrument"],
-                    "status": "pending",
-                },
-            ]
-        } for i, m in enumerate(modules)]
+        phases = []
+        for i, m in enumerate(modules):
+            name = m.get("name", "?")
+            mod_path = m.get("path", "")
+            phases.append({
+                "id": f"{i + 1:02d}",
+                "goal": f"Implement {name} module",
+                "status": "pending",
+                "effort": "medium",
+                "description": (
+                    f"Build the {name} module: "
+                    f"{m.get('responsibility', '?')}"
+                ),
+                "tasks": [
+                    {
+                        "id": f"T{i + 1}.1",
+                        "description": f"Create {name} data structures",
+                        "file": mod_path,
+                        "checks": ["no_unwrap"],
+                        "status": "pending",
+                    },
+                    {
+                        "id": f"T{i + 1}.2",
+                        "description": f"Implement {name} business logic",
+                        "file": mod_path,
+                        "checks": ["file_length", "function_length"],
+                        "status": "pending",
+                    },
+                    {
+                        "id": f"T{i + 1}.3",
+                        "description": f"Write {name} tests",
+                        "file": mod_path,
+                        "checks": ["tracing_instrument"],
+                        "status": "pending",
+                    },
+                ],
+            })
 
-    plan_body = []
-    tasks_body = []
-
-    # Machine-readable frontmatter
-    phase_list = [{"id": p["id"], "goal": p["goal"]} for p in phases]
-
-    machine_yaml = f"phases: {phase_list}\n"
-
+    # Build phase markdown.
+    phase_blocks: list[str] = []
+    all_tasks: list[dict] = []
     for p in phases:
+        tasks = p.get("tasks", [])
+        all_tasks.extend(tasks)
         task_rows = []
         task_details = []
-        for t in p.get("tasks", []):
-            status_mark = "[x]" if t.get("status") == "completed" else "[ ]"
-            task_rows.append(f"| {t['id']} | {t['description'][:50]} | {status_mark} |")
-            task_details.append(f"### {t['id']}: {t['description']}")
-            task_details.append(f"- **File:** `{t.get('file', '?')}`")
-            task_details.append(f"- **Checks:** {', '.join(t.get('checks', []))}")
-            task_details.append(f"- **Status:** {t.get('status', 'pending')}")
-            task_details.append("")
+        for t in tasks:
+            mark = "[x]" if t.get("status") == "completed" else "[ ]"
+            task_rows.append(
+                f"| {t['id']} | {t['description'][:50]} | {mark} |"
+            )
+            task_details.append(
+                f"### {t['id']}: {t['description']}\n"
+                f"- **File:** `{t.get('file', '?')}`\n"
+                f"- **Checks:** {', '.join(t.get('checks', []))}\n"
+                f"- **Status:** {t.get('status', 'pending')}"
+            )
+        phase_blocks.append(
+            f"## Phase {p['id']}: {p['goal']}\n\n"
+            f"**Status:** {p.get('status', 'pending')}  \n"
+            f"**Est. effort:** {p.get('effort', 'medium')}\n\n"
+            f"{p.get('description', '')}\n\n"
+            f"| Task | File/Scope | Status |\n"
+            f"|------|-----------|--------|\n"
+            + ("\n".join(task_rows) if task_rows else "| - | No tasks | - |")
+            + "\n\n"
+            + ("\n\n".join(task_details) if task_details
+               else "No tasks defined.")
+        )
 
-        plan_body.append(PHASE_TEMPLATE.format(
-            id=p["id"], goal=p["goal"], status=p.get("status", "pending"),
-            effort=p.get("effort", "medium"),
-            description=p.get("description", ""),
-            tasks_table="\n".join(task_rows) if task_rows else "| - | No tasks | - |",
-            tasks_detail="\n".join(task_details) if task_details else "No tasks defined.",
-        ))
-
-        all_tasks = []
-        for p in phases:
-            all_tasks.extend(p.get("tasks", []))
-        completed = sum(1 for t in all_tasks if t.get("status") == "completed")
-        total = len(all_tasks)
-        tasks_body.append(f"**{completed}/{total} tasks completed**")
-
-    content = PLAN_TEMPLATE.format(
-        plan_body="\n".join(plan_body),
-        tasks_body="\n".join(tasks_body),
+    plan_body = "\n\n".join(phase_blocks) if phase_blocks else "No phases."
+    completed = sum(1 for t in all_tasks if t.get("status") == "completed")
+    total = len(all_tasks)
+    body = PLAN_BODY_TEMPLATE.substitute(
+        plan_body=plan_body,
+        completed_count=completed,
+        total_count=total,
     )
-    content = f"---\n{machine_yaml}---\n\n" + content.split("---", 2)[-1].strip()
+
+    # Build machine-readable YAML frontmatter (no string-replace trickery).
+    fm_phases = [
+        {
+            "id": p["id"],
+            "goal": p["goal"],
+            "status": p.get("status", "pending"),
+            "tasks": [
+                {"id": t["id"], "status": t.get("status", "pending"),
+                 "description": t.get("description", "")}
+                for t in p.get("tasks", [])
+            ],
+        }
+        for p in phases
+    ]
 
     plan_path = plan_dir / PLAN_FILE
-    plan_path.write_text(content)
+    with open(plan_path, "w") as f:
+        f.write("---\n")
+        yaml.safe_dump({"phases": fm_phases}, f, default_flow_style=False,
+                       sort_keys=False, allow_unicode=True)
+        f.write("---\n\n")
+        f.write(body)
     return str(plan_path)
 
 
 def update_task(path: str, task_id: str, status: str = "completed") -> bool:
-    """Mark a task as completed/pending in PROJECT_PLAN.md."""
+    """Mark a task as completed/pending by editing YAML frontmatter + body.
+
+    Reads the plan, parses YAML safely, mutates the in-memory dict, then
+    rewrites the file using YAML serialization. No string-replace trickery.
+    """
     plan_file = Path(path) / PLANNING_DIR / PLAN_FILE
     if not plan_file.exists():
         return False
-
     content = plan_file.read_text()
-    # Update task status in the YAML frontmatter
-    # This is basic — a proper YAML parser would be better but this works
-    updated = content.replace(
-        f'"id": "{task_id}", "status": "pending"',
-        f'"id": "{task_id}", "status": "{status}"',
-    )
-    if updated == content:
-        # Try another format
-        updated = content.replace(
-            f"'id': '{task_id}', 'status': 'pending'",
-            f"'id': '{task_id}', 'status': '{status}'",
-        )
-    if updated == content:
+
+    fm, body = _split_frontmatter(content)
+    if not fm or "phases" not in fm:
         return False
 
-    plan_file.write_text(updated)
+    updated = False
+    for phase in fm.get("phases", []) or []:
+        for task in phase.get("tasks", []) or []:
+            if task.get("id") == task_id:
+                task["status"] = status
+                updated = True
+
+    if not updated:
+        return False
+
+    new_content = (
+        "---\n"
+        + yaml.safe_dump({"phases": fm["phases"]},
+                         default_flow_style=False, sort_keys=False,
+                         allow_unicode=True)
+        + "---\n\n"
+        + body
+    )
+    plan_file.write_text(new_content)
     return True
 
 
 def get_pending_tasks(path: str) -> list[dict]:
-    """Get all pending tasks from PROJECT_PLAN.md."""
+    """Get all pending tasks from PROJECT_PLAN.md by parsing YAML safely."""
     plan_file = Path(path) / PLANNING_DIR / PLAN_FILE
     if not plan_file.exists():
         return []
 
     content = plan_file.read_text()
-    pending = []
-    for match in re.finditer(r"\{[^}]+\}", content):
-        block = match.group()
-        if '"status": "pending"' in block or "'status': 'pending'" in block:
-            task = {}
-            id_m = re.search(r'"id":\s*"(\w+)"', block)
-            desc_m = re.search(r'"description":\s*"([^"]+)"', block)
-            if id_m:
-                task["id"] = id_m.group(1)
-            if desc_m:
-                task["description"] = desc_m.group(1)
-            if task:
-                pending.append(task)
+    fm, _ = _split_frontmatter(content)
+    if not fm:
+        return []
+
+    pending: list[dict] = []
+    for phase in fm.get("phases", []) or []:
+        for task in phase.get("tasks", []) or []:
+            if task.get("status") == "pending":
+                pending.append({
+                    "id": task.get("id", "?"),
+                    "description": task.get("description", "?"),
+                })
     return pending

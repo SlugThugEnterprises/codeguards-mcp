@@ -236,25 +236,24 @@ def check_growth_drift(project_root: str) -> list[dict]:
     return violations
 
 
-def check_cosmetic_fix(
+def _check_cosmetic_fix(
     project_root: str, violations: list[dict]
 ) -> list[dict]:
-    """Detect cosmetic refactors — shape changed but structure did not.
-    
-    If the dependency graph / responsibility clusters stayed the same
-    but line counts improved, the fix was superficial and should be rejected.
+    """Private stub — detect cosmetic refactors (shape changed, structure did not).
+
+    Not exposed to the public ``STRUCTURAL_CHECKS`` dispatch because the
+    heuristic needs tracking across consecutive check cycles; a single-snapshot
+    comparison produces too many false positives. Kept private until a
+    proper two-baseline diff tracker lands.
     """
     prev = _load_baseline(project_root)
     if not prev:
         return []
 
-    # Check if the current check had improvements
-    # If previous had violations but current shows clean files with same
-    # import structure → flag as cosmetic
-    # This is a heuristic — we flag when files that WERE violating
-    # now pass without actual dependency restructuring.
-
-    return []  # Stub: needs tracking across check cycles to be meaningful
+    # TODO: implement only when there's a way to compare current vs.
+    # previous-check-cycle baseline — not just previous vs. current
+    # (which would also catch real refactors as cosmetic).
+    return []  # Stub: needs two-baseline tracker to be meaningful
 
 
 def save_structural_baseline(project_root: str):

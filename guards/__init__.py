@@ -1,69 +1,40 @@
-"""Plugin system — loads and orchestrates code guard checks."""
+"""Orchestration — wires generic checks, structural checks, plugin guards,
+and project-level checks together.
 
-import importlib
-import inspect
-import os
-import pkgutil
+The plugin registry itself lives in the ``plugins`` package — that is the
+single source of truth for GuardRegistry and load_plugins. This module
+re-exports both for backward compatibility with code that imports from
+``guards``. Generic guards in ``guards/generic.py`` consult
+``plugins.get_global_registry()`` directly to discover per-language
+extractors (e.g., Python's ``function_blocks`` strategy).
+"""
+
+import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from . import generic
 from . import structural
 from detectors import detect_languages, walk_source_files
+from fixes import (
+    fix_deep_nesting,
+    fix_duplicated_code,
+    fix_hardcoded_value,
+    fix_magic_number,
+    fix_missing_docs,
+    fix_no_stubs,
+    fix_parameter_count,
+    fix_swallowed_error,
+)
+
+# Re-export: callers that do ``from guards import GuardRegistry, load_plugins``
+# keep working unchanged. Authoritative definitions live in ``plugins``.
+from plugins import GuardRegistry, load_plugins  # noqa: F401, F405
 
 
-class GuardRegistry:
-    """Registry of available code guards across all plugins."""
-
-    def __init__(self):
-        self._guards: list[dict] = []
-
-    def register_guard(
-        self,
-        name: str,
-        check_fn: Callable,
-        languages: list[str] | None = None,
-        description: str = "",
-        file_extensions: set[str] | None = None,
-    ):
-        """Register a guard check function from a plugin."""
-        self._guards.append({
-            "name": name,
-            "check_fn": check_fn,
-            "languages": languages or [],
-            "description": description,
-            "file_extensions": file_extensions or set(),
-        })
-
-    @property
-    def guards(self) -> list[dict]:
-        """All registered guards."""
-        return list(self._guards)
-
-
-def load_plugins() -> GuardRegistry:
-    """Scan plugins/ directory and load all registered guards."""
-    registry = GuardRegistry()
-
-    plugins_dir = Path(__file__).resolve().parent.parent / "plugins"
-    if plugins_dir.is_dir():
-        # Load each .py file as a plugin
-        for f in sorted(plugins_dir.glob("*.py")):
-            if f.name == "__init__.py":
-                continue
-            mod_name = f"plugins.{f.stem}"
-            try:
-                spec = importlib.util.spec_from_file_location(mod_name, f)
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-                    if hasattr(mod, "register"):
-                        mod.register(registry)
-            except Exception as e:
-                import logging as _log
-                _log.getLogger("codeguards.plugins").warning("failed to load plugin %s: %s", f.name, e)
-
-    return registry
+# Generic checks live in guards.generic — exposed here so run_checks can
+# iterate them. The order is irrelevant; each runs against every source file.
+_GENERIC_CHECKS: dict[str, Callable] = generic.ALL_GENERIC_CHECKS
 
 
 def run_checks(
@@ -72,12 +43,18 @@ def run_checks(
     registry: GuardRegistry,
     languages: list[str] | None = None,
 ) -> list[dict]:
-    """Run all applicable guards against a project — generic, structural, plugin, project-level."""
+    """Run all applicable guards against a project — generic, structural, plugin, project-level.
+
+    Note: ``registry`` is kept as a parameter for backward compat with the MCP
+    server, but generic guards consult ``plugins.get_global_registry()``
+    internally for extractors. If the registry is empty (no plugins), the
+    generic guards fall back to their built-in language-agnostic strategies.
+    """
     if languages is None:
         languages = detect_languages(project_root)
 
     guards_cfg = config.get("guards", {})
-    violations = []
+    violations: list[dict] = []
 
     source_files = walk_source_files(project_root)
 
@@ -168,7 +145,7 @@ def check_missing_tests(project_root: str, config: dict, violations: list[dict])
     }
     min_ratio = cfg.get("min_test_ratio", 0.3)
     source_count = 0
-    untested = []
+    untested: list = []
 
     for sf in walk_source_files(project_root):
         ext = sf.suffix
@@ -193,11 +170,9 @@ def check_missing_tests(project_root: str, config: dict, violations: list[dict])
         if not has_test:
             for dir_pattern in ext_to_test_dir_patterns.get(ext, []):
                 test_dir = parent_dir / dir_pattern
-                if test_dir.is_dir():
-                    # Check for any test file with the basename or a matching pattern
-                    if any(test_dir.iterdir()):
-                        has_test = True
-                        break
+                if test_dir.is_dir() and any(test_dir.iterdir()):
+                    has_test = True
+                    break
 
         if not has_test:
             untested.append(sf)
@@ -220,7 +195,6 @@ def enrich_with_fixes(project_root: str, violations: list[dict]):
     from intent import load_intent, check_intent_violation
     intent = load_intent(project_root)
 
-    # Filter false positives — modify list in-place
     for v in list(violations):
         guard = v.get("guard", "")
         f = v.get("file", "")
@@ -237,7 +211,8 @@ def enrich_with_fixes(project_root: str, violations: list[dict]):
         if any(p == "tests" for p in fp.parts) or fp.name.startswith("test_"):
             if guard in ("no_stubs", "swallowed_errors", "unsafe_patterns",
                           "credentials", "hardcoded_values", "responsibility_clusters",
-                          "glob_imports"):
+                          "glob_imports", "action_items", "duplicated_code",
+                          "god_file", "structural_health"):
                 violations.remove(v)
                 continue
 
@@ -247,50 +222,86 @@ def enrich_with_fixes(project_root: str, violations: list[dict]):
             if intent_msg:
                 v["message"] = f"{v['message']} {intent_msg}"
 
-        # Add fix suggestions if not already present
+        # Add fix suggestions if not already present — single source of text:
+        # the fix text is owned by ``fixes.py``. The dispatch table below
+        # adapts per-guard the minimal violation-context → fix-function args.
         if "fix" not in v:
             fix = _generate_fix(guard, v)
             if fix:
                 v["fix"] = fix
 
 
+# ──────────────────────────────────────────────
+# Fix-suggestion dispatch — single source of text: fixes.py.
+# Each entry extracts the args the corresponding fix function needs from
+# the violation dict (best-effort regex over v.message); falls back to
+# generic text if the data isn't present.
+# ──────────────────────────────────────────────
+
+def _fn_name(v: dict) -> str:
+    """Pull the first backticked identifier from v.message."""
+    m = re.search(r"`([a-zA-Z_]\w*)`", v.get("message", ""))
+    return m.group(1) if m else "item"
+
+
+def _int_after(v: dict, label: str) -> int:
+    """First integer appearing after ``label`` in v.message."""
+    m = re.search(rf"{re.escape(label)}[^\d]*(\d+)", v.get("message", ""))
+    return int(m.group(1)) if m else 0
+
+
 def _generate_fix(guard: str, v: dict) -> str | None:
-    """Generate a fix suggestion based on guard type and violation context."""
-    if guard == "function_length":
-        line = v.get("line", 0)
-        msg = v.get("message", "")
-        return "Split into smaller functions. Extract the largest logical sub-blocks into named functions that describe what they compute."
+    """Resolve a fix suggestion for ``guard`` from the dispatch table.
 
-    if guard == "deep_nesting":
-        return "Refactor with early returns / guard clauses. Invert deep conditions and return early to flatten the happy path."
-
-    if guard == "parameter_count":
-        return "Group parameters into a struct, config object, or builder pattern."
-
-    if guard == "swallowed_errors":
-        return "Handle the error: log it, wrap it in your error type, or propagate it upward. Never silently discard errors."
-
-    if guard == "no_stubs":
-        return "Replace this stub with a real implementation, or add a link to the tracking issue."
-
-    if guard == "hardcoded_values":
-        return "Extract this value to a configuration constant, environment variable, or config file."
-
-    if guard == "missing_docs":
-        return "Add a doc comment explaining what this function does, its parameters, and return value."
-
-    if guard == "magic_numbers":
-        return "Extract this number to a named constant that explains what it represents."
-
-    if guard == "duplicated_code":
-        return "Extract the duplicated logic into a shared function. Identify what varies and make that the parameter."
-
-    if guard == "missing_tests":
-        untested = v.get("untested_files", [])
-        if untested:
-            return f"Create test files for these untested modules. Write the first failing test before implementing: {', '.join(untested[:3])}"
-
-    return None
+    Returns ``None`` when the guard has no registered helper. Exceptions
+    from individual helpers are swallowed so a malformed violation message
+    can't poison the rest of the report.
+    """
+    fn = _FIX_BY_GUARD.get(guard)
+    if fn is None:
+        return None
+    try:
+        return fn(v)
+    except Exception:
+        return None
 
 
-_GENERIC_CHECKS = generic.ALL_GENERIC_CHECKS
+_FIX_BY_GUARD: dict[str, Callable[[dict], str | None]] = {
+    # No matching helpers in fixes.py — keep the existing generic text.
+    "function_length": lambda v: (
+        "Split into smaller functions. Extract the largest logical sub-blocks "
+        "into named functions that describe what they compute."
+    ),
+    "missing_tests": lambda v: (
+        f"Create test files for these untested modules. Write the first "
+        f"failing test before implementing: "
+        f"{', '.join((v.get('untested_files') or [])[:3])}"
+        if v.get("untested_files") else None
+    ),
+    # Each of these has a corresponding ``fixes.fix_*`` helper — dispatch
+    # to it so the wording lives in one place.
+    "deep_nesting": lambda v: fix_deep_nesting(
+        Path(v.get("file", "")), "",
+        v.get("line", 0),
+        _int_after(v, "Nesting depth"),
+        _int_after(v, "exceeds max"),
+    ),
+    "parameter_count": lambda v: fix_parameter_count(
+        _fn_name(v),
+        _int_after(v, "has"),
+        _int_after(v, "max"),
+    ),
+    "swallowed_errors": lambda v: fix_swallowed_error(
+        v.get("message", "")[:200]
+    ),
+    "no_stubs": lambda v: fix_no_stubs(v.get("message", "")[:200]),
+    "hardcoded_values": lambda v: fix_hardcoded_value(
+        v.get("message", "")[:200],
+        v.get("file", ""),
+    ),
+    "missing_docs": lambda v: fix_missing_docs("function", _fn_name(v)),
+    "magic_numbers": lambda v: fix_magic_number(_int_after(v, "Magic number")),
+    "duplicated_code": lambda v: fix_duplicated_code(
+        _int_after(v, "lines"), _int_after(v, "x"),
+    ),
+}

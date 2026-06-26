@@ -6,6 +6,14 @@ Each guard maps to a principle from a senior engineering code audit:
   Complexity   — cyclomatic, nesting, parameter count
   Security     — credential leaks, unsafe patterns
   Maintainability — commented-out code, documentation gaps
+
+Language-specific parsing is provided by plugins (see ``plugins/python.py``
+and ``plugins/rust.py``) via the ``function_blocks`` and ``missing_docs``
+capabilities. Generic guards consult ``get_global_registry().get_extractor``
+when they need language-aware knowledge, and fall back to language-agnostic
+heuristics (e.g., a brace-counter for function lengths) for unknown languages.
+The core never branches on ``path.suffix`` directly any more — the plugin
+layer owns the language-specific knowledge.
 """
 
 import re
@@ -30,6 +38,50 @@ from fixes import (
 
 
 # ──────────────────────────────────────────────
+# Path utilities
+# ──────────────────────────────────────────────
+
+def _is_test_path(path: Path) -> bool:
+    """Whether ``path`` looks like a test file — used to skip checks that
+    produce false positives on test fixtures and mock data.
+
+    Matches common naming conventions: ``tests/``/``test/`` directories,
+    ``test_*`` prefixes, and language-specific suffixes like ``_test.py``,
+    ``_test.rs``, ``.test.ts``, ``.spec.js``.
+    """
+    p = str(path)
+    name = path.name
+    if "/tests/" in p or "/test/" in p:
+        return True
+    if name.startswith("test_") or name.endswith((
+        "_test.py", "_test.rs", "_tests.rs",
+        ".test.ts", ".test.js", ".spec.ts", ".spec.js",
+    )):
+        return True
+    return False
+
+
+# ──────────────────────────────────────────────
+# Plugin extractor lookup — language-agnostic helpers
+# ──────────────────────────────────────────────
+
+def _extractor_for(capability: str, file_ext: str):
+    """Look up a plugin-registered extractor. Returns None if the plugins
+    module isn't loaded yet or no plugin registered for this capability/ext.
+
+    Generic guards never crash on a missing registry — they fall through
+    to language-agnostic heuristics, so tests that import generic.py
+    without first running ``load_plugins()`` still exercise the fallback
+    paths.
+    """
+    try:
+        from plugins import get_global_registry
+        return get_global_registry().get_extractor(capability, file_ext)
+    except Exception:
+        return None
+
+
+# ──────────────────────────────────────────────
 # Architecture — SOC, SRP, modularity
 # ──────────────────────────────────────────────
 
@@ -49,108 +101,122 @@ def check_file_length(path: Path, content: str, cfg: dict) -> list[dict]:
     return []
 
 
+# Pre-compile brace-delimited function-start pattern once at module load.
+_BRACED_FN_START_RE = re.compile(
+    r"^\s*(?:pub\s+|export\s+|public\s+)?(?:async\s+|static\s+)?(?:unsafe\s+)?"
+    r"(?:fn|function|func|def)\s+",
+    re.IGNORECASE,
+)
+
+# Pre-compile function signature pattern for parameter counting.
+_FN_SIG_RE = re.compile(
+    r"^\s*(?:pub\s+|export\s+|public\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"(?:fn|def|function|func)\s+(\w+)\s*\(([^)]*)\)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _brace_counter_function_lengths(path: Path, content: str, max_fn: int) -> list[dict]:
+    """Fallback function-length detector — brace-counted blocks.
+
+    Used for any language without a registered ``function_blocks`` extractor.
+    Catches Rust / JS / C++ / Go / C-style code by tracking matched braces.
+    """
+    violations: list[dict] = []
+    lines = content.split("\n")
+    i = 0
+    while i < len(lines):
+        if _BRACED_FN_START_RE.match(lines[i]):
+            start = i
+            depth = 0
+            seen_open = False
+            end = start
+            for j in range(start, len(lines)):
+                for c in lines[j]:
+                    if c == "{":
+                        depth += 1
+                        seen_open = True
+                    elif c == "}":
+                        depth -= 1
+                if seen_open and depth == 0:
+                    end = j
+                    break
+                if j == len(lines) - 1:
+                    end = j
+            fn_lines = end - start + 1
+            if fn_lines > max_fn:
+                func_name = lines[start].strip()[:60]
+                violations.append({"file": str(path), "line": start + 1,
+                    "message": f"Block exceeds {max_fn} lines ({fn_lines}) — split into smaller units",
+                    "guard": "function_length", "principle": "SRP/Modular"})
+                i = end
+        i += 1
+    return violations
+
+
 def check_function_length(path: Path, content: str, cfg: dict) -> list[dict]:
     """Functions exceeding max lines — too many responsibilities, hard to test.
 
-    Supports brace-delimited (Rust, JS, C++) and indentation-delimited (Python).
+    Strategy:
+      1. Consult the plugin registry for a ``function_blocks`` extractor
+         scoped to ``path.suffix``. Python ships one (plugins/python.py);
+         add more by registering extractors for other languages.
+      2. If no extractor is registered, fall back to a brace-counter that
+         works for any C-style language (Rust, JS, C++, Go, etc.).
+
+    The core never branches on file extension directly — the plugin layer
+    owns the language-specific knowledge.
     """
     if not cfg.get("enabled", True):
         return []
     max_fn = cfg.get("max", 50)
-    violations = []
-    lines = content.split("\n")
-
-    is_python = path.suffix == ".py"
-
-    if is_python:
-        fn_re = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE)
-        for m in fn_re.finditer(content):
-            start_line = content[:m.start()].count("\n")
-            fn_name = m.group(1)
-            if fn_name.startswith("_"):
-                continue
-            # Find the function block via indentation
-            base_indent = len(m.group()) - len(m.group().lstrip())
-            end_line = start_line + 1
-            for j in range(end_line, len(lines)):
-                stripped = lines[j].strip()
-                if stripped == "":
-                    continue
-                if stripped.startswith("#"):
-                    continue
-                indent = len(lines[j]) - len(lines[j].lstrip())
-                if indent <= base_indent and stripped not in ("", "..."):
-                    break
-                end_line = j
-            fn_lines = end_line - start_line + 1
-            if fn_lines > max_fn:
-                violations.append({"file": str(path), "line": start_line + 1,
-                    "message": f"Function `{fn_name}` exceeds {max_fn} lines ({fn_lines}) — split into smaller units",
+    extractor = _extractor_for("function_blocks", path.suffix)
+    if extractor is not None:
+        try:
+            blocks = extractor(content) or []
+        except Exception:
+            blocks = []
+        violations: list[dict] = []
+        for b in blocks:
+            if b["length"] > max_fn:
+                violations.append({"file": str(path), "line": b["start_line"] + 1,
+                    "message": f"Function `{b['name']}` exceeds {max_fn} lines ({b['length']}) — split into smaller units",
                     "guard": "function_length", "principle": "SRP/Modular"})
-    else:
-        # Brace-delimited: Rust, JS, C++, Go, etc.
-        fn_re = re.compile(
-            r"^\s*(?:pub\s+|export\s+|public\s+)?(?:async\s+|static\s+)?(?:unsafe\s+)?"
-            r"(?:fn|function|func|def)\s+",
-            re.IGNORECASE
-        )
-        i = 0
-        while i < len(lines):
-            if fn_re.match(lines[i]):
-                start = i
-                depth = 0
-                seen_open = False
-                end = start
-                for j in range(start, len(lines)):
-                    for c in lines[j]:
-                        if c == '{':
-                            depth += 1
-                            seen_open = True
-                        elif c == '}':
-                            depth -= 1
-                    if seen_open and depth == 0:
-                        end = j
-                        break
-                    if j == len(lines) - 1:
-                        end = j
-                fn_lines = end - start + 1
-                if fn_lines > max_fn:
-                    func_name = lines[start].strip()[:60]
-                    violations.append({"file": str(path), "line": start + 1,
-                        "message": f"Block exceeds {max_fn} lines ({fn_lines}) — split into smaller units",
-                        "guard": "function_length", "principle": "SRP/Modular"})
-                i = end
-            i += 1
+        return violations
+    # Fallback: brace-counter works for Rust/JS/C++/Go/etc.
+    return _brace_counter_function_lengths(path, content, max_fn)
 
-    return violations
+
+# Pre-compile god-file pub/import patterns.
+_GOD_FILE_PUB_RE = re.compile(
+    r"^\s*(pub\s+)(fn|struct|enum|trait|mod|type|const|static)\s"
+    r"|^\s*(export\s+)(function|class|const|interface|type|enum)\s"
+    r"|^\s*(def\s+\w+|class\s+\w+)\s*(?:\(|:)",
+    re.MULTILINE,
+)
+_GOD_FILE_IMPORTS_RE = re.compile(
+    r"^\s*(use\s+[\w:]+)"
+    r"|^\s*(import\s+[\w.]+)"
+    r"|^\s*(require\(|from\s+[\w.]+\s+import)",
+    re.MULTILINE,
+)
 
 
 def check_god_file(path: Path, content: str, cfg: dict) -> list[dict]:
     """God files have too many imports or public items — SRP violation."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    violations: list[dict] = []
     max_public = cfg.get("max_public_items", 15)
     max_imports = cfg.get("max_imports", 20)
 
-    # Count public items (pub fn, pub struct, export, def/class with docstring)
-    pub_patterns = [r"^\s*(pub\s+)(fn|struct|enum|trait|mod|type|const|static)\s",
-                    r"^\s*(export\s+)(function|class|const|interface|type|enum)\s",
-                    r'^\s*(def\s+\w+|class\s+\w+)\s*(?:\(|:)']
-    pub_re = re.compile("|".join(pub_patterns), re.MULTILINE)
-    pub_count = len(pub_re.findall(content))
-    if pub_count > max_public:
+    if len(_GOD_FILE_PUB_RE.findall(content)) > max_public:
         violations.append({"file": str(path), "line": 1,
-            "message": f"Too many public items ({pub_count}, max {max_public}) — likely god file, split into modules",
+            "message": f"Too many public items (max {max_public}) — likely god file, split into modules",
             "guard": "god_file", "principle": "SRP"})
-
-    # Count imports
-    import_patterns = [r"^\s*(use\s+[\w:]+)", r"^\s*(import\s+[\w.]+)", r"^\s*(require\(|from\s+[\w.]+\s+import)"]
-    import_re = re.compile("|".join(import_patterns), re.MULTILINE)
-    import_count = len(import_re.findall(content))
-    if import_count > max_imports:
+    if len(_GOD_FILE_IMPORTS_RE.findall(content)) > max_imports:
         violations.append({"file": str(path), "line": 1,
-            "message": f"Too many imports ({import_count}, max {max_imports}) — high coupling, split into modules",
+            "message": f"Too many imports (max {max_imports}) — high coupling, split into modules",
             "guard": "god_file", "principle": "DRY/Modular"})
     return violations
 
@@ -163,7 +229,8 @@ def check_forbidden_phrases(path: Path, content: str, cfg: dict) -> list[dict]:
     """No weasel words — forces concrete, defensible language."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    violations: list[dict] = []
+    lines = content.split("\n")
     for entry in cfg.get("patterns", []):
         pat, msg = entry.get("pattern", ""), entry.get("message", "")
         try:
@@ -172,8 +239,8 @@ def check_forbidden_phrases(path: Path, content: str, cfg: dict) -> list[dict]:
             continue
         for m in re_obj.finditer(content):
             line_num = content[:m.start()].count("\n") + 1
-            line = content.split("\n")[line_num - 1] if line_num <= len(content.split("\n")) else ""
-            # Skip if the match is inside a raw regex string (r"pattern") — false positive
+            line = lines[line_num - 1] if line_num <= len(lines) else ""
+            # Skip false positive when match is inside a raw regex string.
             stripped = line.strip()
             if stripped.startswith("r\"") or stripped.startswith("r'"):
                 continue
@@ -184,18 +251,23 @@ def check_forbidden_phrases(path: Path, content: str, cfg: dict) -> list[dict]:
     return violations
 
 
+# Glob import patterns, pre-compiled once.
+_GLOB_IMPORT_PATTERNS = [
+    re.compile(p, re.MULTILINE) for p in (
+        r"^\s*(use\s+[\w:]+\s*::\s*\*)",                          # Rust
+        r"^\s*(from\s+[\w.]+\s+import\s+\*)",                       # Python
+        r"^\s*(import\s+[\w.]+\s*\.\s*\*)",                         # JS/TS
+    )
+]
+
+
 def check_glob_imports(path: Path, content: str, cfg: dict) -> list[dict]:
     """No wildcard imports — imports should be explicit."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
-    patterns = [
-        r"^\s*(use\s+[\w:]+\s*::\s*\*)",             # Rust
-        r"^\s*(from\s+[\w.]+\s+import\s+\*)",         # Python
-        r"^\s*(import\s+[\w.]+\s*\.\s*\*)",            # TS/JS
-    ]
-    for pat in patterns:
-        for m in re.compile(pat, re.MULTILINE).finditer(content):
+    violations: list[dict] = []
+    for pat in _GLOB_IMPORT_PATTERNS:
+        for m in pat.finditer(content):
             violations.append({"file": str(path),
                 "line": content[:m.start()].count("\n") + 1,
                 "message": "Glob import — import specific names instead",
@@ -203,39 +275,49 @@ def check_glob_imports(path: Path, content: str, cfg: dict) -> list[dict]:
     return violations
 
 
-def check_debug_statements(path: Path, content: str, cfg: dict) -> list[dict]:
-    """No debug output in production code — use structured logging."""
-    if not cfg.get("enabled", True):
-        return []
-    violations = []
-    patterns = [
+# Debug-statement patterns, pre-compiled once.
+_DEBUG_PATTERNS = [
+    (re.compile(p, re.MULTILINE), msg) for p, msg in (
         (r"^\s*println!\(", "use tracing::info! or log::info!"),
         (r"^\s*dbg!\(", "use tracing::debug! or remove"),
         (r"^\s*(?:eprintln!|eprint!)\(", "use tracing::error!"),
         (r"^\s*print\((?!.*logger|.*logging)", "use logger.info() or structured logging"),
         (r"^\s*console\.(log|debug|warn)\(", "use structured logger"),
         (r"^\s*(?:log|fmt)\.(Print|Fprint)(?:f|ln)?\(", "use structured logger"),
-    ]
-    for pat, msg in patterns:
-        for m in re.compile(pat, re.MULTILINE).finditer(content):
-            line = content[:m.start()].count("\n") + 1
-            violations.append({"file": str(path), "line": line,
+    )
+]
+
+
+def check_debug_statements(path: Path, content: str, cfg: dict) -> list[dict]:
+    """No debug output in production code — use structured logging."""
+    if not cfg.get("enabled", True):
+        return []
+    violations: list[dict] = []
+    for pat, msg in _DEBUG_PATTERNS:
+        for m in pat.finditer(content):
+            violations.append({"file": str(path),
+                "line": content[:m.start()].count("\n") + 1,
                 "message": f"Debug statement — {msg}",
                 "guard": "debug_statements", "principle": "Logging"})
     return violations
+
+
+_CODE_LIKE_RE = re.compile(
+    r"[{}();=\[\]]"
+    r"|^\s*(?:if|for|while|fn|def|function|return|let|const|var|match)\b"
+)
 
 
 def check_commented_code(path: Path, content: str, cfg: dict) -> list[dict]:
     """No large blocks of commented-out code — use version control."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    violations: list[dict] = []
     threshold = cfg.get("min_lines", 5)
     lines = content.split("\n")
     in_comment_block = False
     comment_start = 0
     comment_lines = 0
-    code_like = re.compile(r"[{}();=\[\]]|^\s*(?:if|for|while|fn|def|function|return|let|const|var|match)\b")
 
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -250,7 +332,7 @@ def check_commented_code(path: Path, content: str, cfg: dict) -> list[dict]:
             if "*/" in stripped:
                 in_comment_block = False
             continue
-        if is_comment and code_like.search(line):
+        if is_comment and _CODE_LIKE_RE.search(line):
             comment_lines += 1
             if comment_lines == 1:
                 comment_start = i
@@ -258,23 +340,16 @@ def check_commented_code(path: Path, content: str, cfg: dict) -> list[dict]:
                 violations.append({"file": str(path), "line": comment_start + 1,
                     "message": "Commented-out code block — remove or use version control",
                     "guard": "commented_code", "principle": "Maintainability"})
-                comment_lines = 0  # Reset to avoid duplicate reports
+                comment_lines = 0
         else:
             comment_lines = 0
     return violations
 
 
-def check_magic_numbers(path: Path, content: str, cfg: dict) -> list[dict]:
-    """No unexplained numeric literals — use named constants."""
-    if not cfg.get("enabled", True):
-        return []
-    violations = []
-    # Skip common non-magic numbers: 0, 1, -1, 2, 100, 1000, array indices
-    skip = {0, 1, -1, 2, 10, 100, 1000}
-    if "constants.py" in str(path):
-        return []
-
-    skip_patterns = [
+_MAGIC_RE = re.compile(r"(?<![a-zA-Z_#\"])(?<!\w)(-?\d{2,})(?!\w)")
+_SKIP_NUMBERS = frozenset({0, 1, -1, 2, 10, 100, 1000})
+_MAGIC_SKIP_PATTERNS = [
+    re.compile(p) for p in (
         r"^\s*(use|import|mod|const|static|let mut|let\s+\w+:|function\s+\w+|///|//)",
         r"array|index|idx|\.push\(",
         r"\b(max|min)_(prod|test|fn|lines|depth|params|deps|score|ratio)\b",
@@ -282,16 +357,25 @@ def check_magic_numbers(path: Path, content: str, cfg: dict) -> list[dict]:
         r"\bassert(_eq|_ne|_gt|_lt|_ge|_le)?\s*\(",
         r"\bself\.assert",
         r"^\s*(?:#\s*|//\s*).*\d+",
-    ]
+    )
+]
 
-    magic_re = re.compile(r"(?<![a-zA-Z_#\"])(?<!\w)(-?\d{2,})(?!\w)")
-    for m in magic_re.finditer(content):
+
+def check_magic_numbers(path: Path, content: str, cfg: dict) -> list[dict]:
+    """No unexplained numeric literals — use named constants."""
+    if not cfg.get("enabled", True):
+        return []
+    if "constants.py" in str(path):
+        return []
+    lines = content.split("\n")
+    violations: list[dict] = []
+    for m in _MAGIC_RE.finditer(content):
         num = int(m.group())
-        if num in skip:
+        if num in _SKIP_NUMBERS:
             continue
         line_num = content[:m.start()].count("\n") + 1
-        line = content.split("\n")[line_num - 1] if line_num <= len(content.split("\n")) else ""
-        if any(re.search(p, line) for p in skip_patterns):
+        line = lines[line_num - 1] if line_num <= len(lines) else ""
+        if any(pat.search(line) for pat in _MAGIC_SKIP_PATTERNS):
             continue
         violations.append({"file": str(path), "line": line_num,
             "message": f"Magic number {num} — extract to a named constant",
@@ -303,12 +387,11 @@ def check_duplicated_code(path: Path, content: str, cfg: dict) -> list[dict]:
     """Detect copy-paste via n-gram similarity — DRY violation."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    violations: list[dict] = []
     n = cfg.get("n_gram_size", 5)
     min_repeats = cfg.get("min_repeats", 2)
     min_line_len = cfg.get("min_line_len", 10)
 
-    # Normalize: strip whitespace, skip short lines and comments
     lines = []
     for l in content.split("\n"):
         stripped = l.strip()
@@ -323,44 +406,42 @@ def check_duplicated_code(path: Path, content: str, cfg: dict) -> list[dict]:
     if len(lines) < n:
         return violations
 
-    n_grams = []
-    for i in range(len(lines) - n + 1):
-        n_gram = "\n".join(lines[i:i + n])
-        n_grams.append(n_gram)
-
+    n_grams = ["\n".join(lines[i:i + n]) for i in range(len(lines) - n + 1)]
     counter = Counter(n_grams)
     for gram, count in counter.most_common():
         if count >= min_repeats and len(gram) > 30:
-            # Find the first occurrence line
             idx = n_grams.index(gram)
             violations.append({"file": str(path), "line": idx + 1,
                 "message": f"Duplicated code block (repeated {count}x, {n} lines each) — extract into shared function",
                 "guard": "duplicated_code", "principle": "DRY"})
-            if len(violations) >= 5:  # Don't flood
+            if len(violations) >= 5:
                 break
     return violations
 
 
-    if "/tests/" in str(path) or path.name.startswith("test_"):
-        return []
-
 def check_unsafe_patterns(path: Path, content: str, cfg: dict) -> list[dict]:
-    """Flag unsafe operations — eval, exec, raw SQL, unchecked access."""
+    """Flag unsafe operations — eval, exec, raw SQL, unchecked access.
+
+    Skips test files — fixtures intentionally use mock unsafe-looking code."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    if _is_test_path(path):
+        return []
+    violations: list[dict] = []
     patterns = [
         (r"\beval\s*\(", "eval() — code injection risk"),
         (r"\bexec\s*\(", "exec() — arbitrary code execution"),
         (r"\bunsafe\s*\{", "unsafe block — requires explicit justification comment"),
         (r"\.unwrap_unchecked\(", "unchecked unwrap — potential panic"),
     ]
-    for pat, msg in patterns:
-        for m in re.compile(pat).finditer(content):
+    for pat_str, msg in patterns:
+        re_obj = re.compile(pat_str)
+        for m in re_obj.finditer(content):
             violations.append({"file": str(path),
                 "line": content[:m.start()].count("\n") + 1,
                 "message": f"{m.group().strip()[:30]} — {msg}",
-                "guard": "unsafe_patterns", "severity": "error", "principle": "Security"})
+                "guard": "unsafe_patterns", "severity": "error",
+                "principle": "Security"})
     return violations
 
 
@@ -368,64 +449,58 @@ def check_unsafe_patterns(path: Path, content: str, cfg: dict) -> list[dict]:
 # Complexity — nesting depth, parameter count
 # ──────────────────────────────────────────────
 
+_NEST_INDENT_RE_4 = re.compile(r"^(\s{4,})")
+_NEST_INDENT_RE_2 = re.compile(r"^(\s{2,})")
+_NEST_INDENT_RE_T = re.compile(r"^(\t+)")
+
+
 def check_deep_nesting(path: Path, content: str, cfg: dict) -> list[dict]:
     """No deep nesting — flag lines with >3 levels of indentation/braces.
 
-    Skips continuation lines in multi-line function signatures (not real nesting).
-    """
+    Skips continuation lines in multi-line function signatures (not real nesting)."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    violations: list[dict] = []
     max_nest = cfg.get("max_depth", 4)
     lines = content.split("\n")
 
-    # Track whether we're inside a function parameter list (not real nesting)
     in_params = False
     paren_depth = 0
 
-    nest_counters = {
-        "4-spaces": re.compile(r"^(\s{4,})"),
-        "2-spaces": re.compile(r"^(\s{2,})"),
-        "tabs": re.compile(r"^(\t+)"),
-    }
+    nest_styles = (
+        ("4-spaces", _NEST_INDENT_RE_4, 4),
+        ("2-spaces", _NEST_INDENT_RE_2, 2),
+        ("tabs", _NEST_INDENT_RE_T, 1),
+    )
 
-    for style, re_obj in nest_counters.items():
+    for style, re_obj, divisor in nest_styles:
         for i, line in enumerate(lines):
             stripped = line.strip()
-            # Skip empty and comment lines
             if stripped == "" or stripped.startswith("//") or stripped.startswith("#"):
                 continue
 
-            # If we entered params on a previous line, we're still in them
             if paren_depth > 0:
                 in_params = True
-
-            # Track paren depth to skip function signature continuations
             for c in stripped:
-                if c == '(':
+                if c == "(":
                     paren_depth += 1
                     in_params = True
-                elif c == ')':
+                elif c == ")":
                     paren_depth -= 1
-            # Only exit params when paren depth returns to zero
             if paren_depth <= 0:
                 in_params = False
                 paren_depth = 0
-
             if in_params:
-                continue  # Not real nesting — parameter list alignment
+                continue
 
             m = re_obj.match(line)
             if m:
-                divisor = 4 if style == "4-spaces" else 2 if style == "2-spaces" else 1
                 depth = len(m.group(1)) // divisor
                 if depth > max_nest:
                     violations.append({"file": str(path), "line": i + 1,
                         "message": f"Nesting depth {depth} exceeds max {max_nest} — refactor with early returns or helper functions",
                         "guard": "deep_nesting", "principle": "Complexity"})
                     break
-            if violations:
-                break
         if violations:
             break
     return violations
@@ -435,20 +510,13 @@ def check_parameter_count(path: Path, content: str, cfg: dict) -> list[dict]:
     """Functions with too many parameters — hard to understand, easy to misorder."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    violations: list[dict] = []
     max_params = cfg.get("max_params", 5)
 
-    # Match function definitions and count params between first ( and )
-    fn_re = re.compile(
-        r"^\s*(?:pub\s+|export\s+|public\s+)?(?:async\s+)?(?:unsafe\s+)?"
-        r"(?:fn|def|function|func)\s+(\w+)\s*\(([^)]*)\)",
-        re.MULTILINE | re.IGNORECASE
-    )
-    for m in fn_re.finditer(content):
+    for m in _FN_SIG_RE.finditer(content):
         params = m.group(2).strip()
         if not params:
             continue
-        # Split on commas, respecting generics angle brackets
         count = _count_params(params)
         if count > max_params:
             violations.append({"file": str(path),
@@ -476,14 +544,15 @@ def _count_params(params_str: str) -> int:
 # Security — credential leaks
 # ──────────────────────────────────────────────
 
-    if "/tests/" in str(path) or path.name.startswith("test_"):
-        return []
-
 def check_credentials(path: Path, content: str, cfg: dict) -> list[dict]:
-    """No API keys, tokens, or secrets in source code."""
+    """No API keys, tokens, or secrets in source code.
+
+    Skips test files — fixtures contain mock credentials."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    if _is_test_path(path):
+        return []
+    violations: list[dict] = []
     for entry in cfg.get("patterns", []):
         pat, msg = entry.get("pattern", ""), entry.get("message", "")
         try:
@@ -508,7 +577,7 @@ def check_action_items(path: Path, content: str, cfg: dict) -> list[dict]:
         return []
     if not cfg.get("require_issue", True):
         return []
-    violations = []
+    violations: list[dict] = []
 
     allowed = cfg.get("allowed_pattern", r"//\s*(TODO|FIXME|HACK|ACTION)\(#\d+\):")
     scan_pattern = cfg.get("scan_pattern", r"//\s*(TODO|FIXME|HACK|ACTION)\b")
@@ -519,8 +588,11 @@ def check_action_items(path: Path, content: str, cfg: dict) -> list[dict]:
     except re.error:
         return violations
 
+    lines = content.split("\n")
     for m in scan_re.finditer(content):
-        if allowed_re.search(m.group()):
+        line_num = content[:m.start()].count("\n")
+        line = lines[line_num] if line_num < len(lines) else ""
+        if allowed_re.search(line):
             continue
         violations.append({"file": str(path),
             "line": content[:m.start()].count("\n") + 1,
@@ -533,31 +605,30 @@ def check_action_items(path: Path, content: str, cfg: dict) -> list[dict]:
 # Error Handling — no swallowed errors, error context
 # ──────────────────────────────────────────────
 
-    if "/tests/" in str(path) or path.name.startswith("test_"):
-        return []
-
 def check_swallowed_errors(path: Path, content: str, cfg: dict) -> list[dict]:
-    """Empty catch/except blocks — errors eaten silently, nightmare to debug."""
+    """Empty catch/except blocks — errors eaten silently, nightmare to debug.
+
+    Skips test files — fixtures intentionally use ``except: pass`` to
+    isolate failure modes."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
+    if _is_test_path(path):
+        return []
+    violations: list[dict] = []
 
     patterns = [
-        # Rust: catch-all with empty body
         (r"(?s)_\s*=>\s*\{\s*\}", "Empty match arm — silently drops error, handle or propagate it"),
         (r"(?s)Err\(\s*_\s*\)\s*=>\s*\{\s*\}", "Swallowed Err — handle the error or add context to the return"),
-        # Python: bare except or empty except block
         (r"except\s*:\s*pass", "Bare `except: pass` — swallows all errors including KeyboardInterrupt"),
         (r"(?s)except\s+Exception\s*:\s*pass", "`except Exception: pass` — silently drops real errors"),
         (r"(?s)except\s+\w+\s*:\s*pass", "Empty except block — at minimum log the error"),
-        # JS/TS: empty catch
         (r"(?s)catch\s*\(\s*\w*\s*\)\s*\{\s*\}", "Empty catch block — silently swallows error"),
         (r"(?s)catch\s*\{\s*\}", "Empty catch block — silently swallows error"),
         (r"(?s)\.catch\(\s*\(\s*\)\s*=>\s*\{\s*\}\s*\)", "Empty promise catch — swallows async errors"),
     ]
-
-    for pat, msg in patterns:
-        for m in re.compile(pat).finditer(content):
+    for pat_str, msg in patterns:
+        re_obj = re.compile(pat_str)
+        for m in re_obj.finditer(content):
             violations.append({"file": str(path),
                 "line": content[:m.start()].count("\n") + 1,
                 "message": f"{m.group()[:40].strip()} — {msg}",
@@ -569,32 +640,25 @@ def check_no_stubs(path: Path, content: str, cfg: dict) -> list[dict]:
     """No placeholder/stub implementations in production code."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
-    # Skip test files — stubs in test data are intentional test inputs
-    fname = path.name
-    if "/tests/" in str(path) or fname.startswith("test_") or fname.endswith(("_test.py", "_test.rs", "_tests.rs")):
-        return violations
+    if _is_test_path(path):
+        return []
+    violations: list[dict] = []
 
     patterns = [
-        # Rust
         (r"\btodo!\s*\(", "stub `todo!()` in production code"),
         (r"\bunimplemented!\s*\(", "stub `unimplemented!()` in production code"),
         (r"\bunreachable!\s*\(\s*\"(?:not implemented|TODO|stub)", "stub `unreachable!()` with placeholder message"),
-        # Python
         (r"^\s*pass\s*#\s*(?:TODO|FIXME|stub|placeholder)", "Stub pass with TODO — implement or remove"),
         (r"\braise\s+NotImplementedError\b", "Stub `raise NotImplementedError` — implement before shipping"),
-        # JS/TS
         (r"\bthrow\s+new\s+Error\s*\(\s*[\"'](?:not\s+implemented|TODO|stub)", "Stub error — implement before shipping"),
-        # Generic
         (r"(?i)#\s*FIXME.*(?:stub|placeholder|replace\s+me)", "Stub comment — implement or remove"),
     ]
-
-    for pat, msg in patterns:
-        for m in re.compile(pat, re.IGNORECASE).finditer(content):
+    for pat_str, msg in patterns:
+        re_obj = re.compile(pat_str, re.IGNORECASE)
+        for m in re_obj.finditer(content):
             line = content[:m.start()].count("\n") + 1
             line_text = content.split("\n")[line - 1].strip()
             if line_text.startswith("//") or line_text.startswith("#") or line_text.startswith("///"):
-                # Only flag comments that explicitly say "stub"/"placeholder"
                 if not any(w in line_text.lower() for w in ("stub", "placeholder", "replace me")):
                     continue
             violations.append({"file": str(path), "line": line,
@@ -603,36 +667,44 @@ def check_no_stubs(path: Path, content: str, cfg: dict) -> list[dict]:
     return violations
 
 
-    if "/tests/" in str(path) or path.name.startswith("test_"):
-        return []
+# ──────────────────────────────────────────────
+# Configuration — hardcoded values
+# ──────────────────────────────────────────────
+
+_HARDCODED_PATTERNS = [
+    re.compile(p, re.MULTILINE) for p in (
+        r"""(?<!\w)["'](https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0)[^"']{8,})['"]""",
+        r"""(?<!\w)["']((?!127\.|0\.0\.|::1|192\.168\.|10\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})['"]""",
+        r"""(?i)(?:\bport\s*[=:]\s*|:\s*)(\d{4,5})\b""",
+        r"""(?i)(?:\btimeout\s*[=:]\s*|\btimeout_secs?\s*[=:]\s*)(\d{2,})\b""",
+    )
+]
+_HARDCODED_SKIP_RE = re.compile(
+    r"^\s*(?:const|static|let\s+\w+:|import|use)\s",
+)
+_HARDCODED_MESSAGES = (
+    "Hardcoded URL — extract to config or environment variable",
+    "Hardcoded IP address — extract to config",
+    "Hardcoded port — extract to config constant",
+    "Hardcoded timeout — extract to config constant",
+)
+
 
 def check_hardcoded_values(path: Path, content: str, cfg: dict) -> list[dict]:
-    """Configuration values as raw literals — should come from config/env."""
+    """Configuration values as raw literals — should come from config/env.
+
+    Skips test files — fixtures contain hardcoded URLs/ports as inputs."""
     if not cfg.get("enabled", True):
         return []
-    violations = []
-
-    patterns = [
-        # URLs that look hardcoded
-        (r"""(?<!\w)["'](https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0)[^"']{8,})['"]""",
-         "Hardcoded URL — extract to config or environment variable"),
-        # IP addresses (not localhost)
-        (r"""(?<!\w)["']((?!127\.|0\.0\.|::1|192\.168\.|10\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})['"]""",
-         "Hardcoded IP address — extract to config"),
-        # Raw port numbers that look like configuration
-        (r"""(?i)(?:\bport\s*[=:]\s*|:\s*)(\d{4,5})\b""",
-         "Hardcoded port — extract to config constant"),
-        # Timeout values in seconds (magic numbers that are config)
-        (r"""(?i)(?:\btimeout\s*[=:]\s*|\btimeout_secs?\s*[=:]\s*)(\d{2,})\b""",
-         "Hardcoded timeout — extract to config constant"),
-    ]
-
-    for pat, msg in patterns:
-        for m in re.compile(pat, re.MULTILINE).finditer(content):
+    if _is_test_path(path):
+        return []
+    violations: list[dict] = []
+    lines = content.split("\n")
+    for re_obj, msg in zip(_HARDCODED_PATTERNS, _HARDCODED_MESSAGES):
+        for m in re_obj.finditer(content):
             line = content[:m.start()].count("\n") + 1
-            line_text = content.split("\n")[line - 1] if line <= len(content.split("\n")) else ""
-            # Don't flag in const/static/import lines
-            if re.match(r"^\s*(?:const|static|let\s+\w+:|import|use)\s", line_text):
+            line_text = lines[line - 1] if line <= len(lines) else ""
+            if _HARDCODED_SKIP_RE.match(line_text):
                 continue
             violations.append({"file": str(path), "line": line,
                 "message": f"Hardcoded config value `{m.group(1)[:30]}` — {msg}",
@@ -640,64 +712,35 @@ def check_hardcoded_values(path: Path, content: str, cfg: dict) -> list[dict]:
     return violations
 
 
+# ──────────────────────────────────────────────
+# Documentation gaps — delegated to plugins.
+# ──────────────────────────────────────────────
+
 def check_missing_docs(path: Path, content: str, cfg: dict) -> list[dict]:
-    """Public items without docstrings — poor maintainability signal."""
+    """Public items without docstrings — poor maintainability signal.
+
+    Looks up a plugin-registered ``missing_docs`` extractor for the
+    file's extension. Currently Python and Rust both ship extractors
+    (see plugins/python.py and plugins/rust.py); other languages get
+    no check until a plugin registers one.
+
+    The core never branches on file extension directly — that knowledge
+    lives in the plugin layer.
+    """
     if not cfg.get("enabled", True):
         return []
-    violations = []
-    lines = content.split("\n")
-
-    # Rust: pub fn/pub struct/pub enum without /// on preceding line
-    rust_pub = re.compile(r"^\s*pub\s+(?:async\s+)?(?:unsafe\s+)?(fn|struct|enum|trait|mod)\s+(\w+)")
-    for i, line in enumerate(lines):
-        m = rust_pub.match(line)
-        if not m:
-            continue
-        item_type, item_name = m.group(1), m.group(2)
-        # Check if any of the 3 preceding lines (allowing attributes) have a doc comment
-        has_doc = False
-        for j in range(max(0, i - 5), i):
-            if lines[j].strip().startswith("///") or lines[j].strip().startswith("#[doc"):
-                has_doc = True
-                break
-            # Allow attributes like #[derive(...)], #[cfg(...)]
-            if lines[j].strip().startswith("#[") and not lines[j].strip().startswith("#[doc"):
-                continue
-            if lines[j].strip() == "":
-                continue
-            break  # non-attribute, non-blank, non-doc line means no doc comment
-        if not has_doc and item_name not in ("new", "default", "run", "main"):
-            violations.append({"file": str(path), "line": i + 1,
-                "message": f"Public {item_type} `{item_name}` has no doc comment — add /// documentation",
-                "guard": "missing_docs", "principle": "Maintainability"})
-
-    # Python: def or class without """ docstring on next non-blank line
-    if path.suffix == ".py":
-        py_pub = re.compile(r"^\s*def\s+(\w+)|^\s*class\s+(\w+)")
-        for i, line in enumerate(lines):
-            m = py_pub.match(line)
-            if not m:
-                continue
-            func_name = m.group(1) or m.group(2)
-            if func_name and func_name.startswith("_"):
-                continue  # private
-            # Skip multi-line signature continuations before checking for docstring
-            has_doc = False
-            for j in range(i + 1, min(i + 10, len(lines))):
-                stripped = lines[j].strip()
-                if stripped == "" or stripped.startswith("#"):
-                    continue
-                # Line ends with ( or , → continuation of signature
-                if stripped.endswith("(") or stripped.endswith(",") or stripped == ")" or stripped.startswith(")"):
-                    continue
-                if stripped.startswith('"""') or stripped.startswith("'''"):
-                    has_doc = True
-                break
-            if not has_doc:
-                violations.append({"file": str(path), "line": i + 1,
-                    "message": f"Public function `{func_name}` has no docstring — add documentation",
-                    "guard": "missing_docs", "principle": "Maintainability"})
-
+    extractor = _extractor_for("missing_docs", path.suffix)
+    if extractor is None:
+        return []  # no plugin handles this language
+    try:
+        items = extractor(content) or []
+    except Exception:
+        return []
+    violations: list[dict] = []
+    for item in items:
+        violations.append({"file": str(path), "line": item["line"] + 1,
+            "message": f"Public {item['type']} `{item['name']}` has no doc comment — add documentation",
+            "guard": "missing_docs", "principle": "Maintainability"})
     return violations
 
 
@@ -724,5 +767,18 @@ ALL_GENERIC_CHECKS = {
     "no_stubs": check_no_stubs,
     "hardcoded_values": check_hardcoded_values,
     "missing_docs": check_missing_docs,
-
 }
+
+
+# Auto-load plugins the first time the module is imported, so generic
+# guards can find extractors for whatever languages are registered.
+# ``load_plugins`` is idempotent — calling it again just overwrites the
+# registry with whatever's currently on disk. Tests that want a clean
+# registry can call ``_set_global_registry`` directly or pass their own.
+try:
+    from plugins import load_plugins
+    load_plugins()
+except Exception:
+    # Plugins failing to load shouldn't break generic.py import — falls
+    # back to brace-counter and no-op for missing_docs.
+    pass

@@ -116,6 +116,86 @@ def test_no_imports():
     assert analysis["unique_imports"] == 0
 
 
+def test_domain_with_underscores_and_digits():
+    """Domain names like domain_0, config_v2 should be internal, not external."""
+    code = (
+        "use crate::domain_0::Foo;\n"
+        "use crate::domain_1::Bar;\n"
+        "use crate::config_v2::Config;\n"
+        "use serde::Deserialize;\n"
+    )
+    analysis = analyze_imports(code, ".rs")
+    assert "domain_0" in analysis["domain_list"], f"Got: {analysis['domain_list']}"
+    assert "domain_1" in analysis["domain_list"]
+    assert "config_v2" in analysis["domain_list"]
+    assert analysis["internal_domains"] == 3
+    assert analysis["external_imports"] == 1  # only serde
+
+
+def test_unknown_external_crate_not_internal():
+    """A bare `use some_crate::Thing;` (no crate::/super:: prefix)
+    should be classified as external, not internal — even if the name
+    looks like a valid identifier."""
+    code = (
+        "use some_random_crate::Thing;\n"
+        "use another_crate::Stuff;\n"
+    )
+    analysis = analyze_imports(code, ".rs")
+    assert analysis["internal_domains"] == 0
+    assert analysis["external_imports"] == 2
+
+
+def test_crate_prefixed_import_is_internal():
+    """crate:: and super:: prefixed imports are always internal."""
+    code = (
+        "use crate::domain_0::Foo;\n"
+        "use crate::config_v2::Config;\n"
+        "use super::helpers::Helper;\n"
+    )
+    analysis = analyze_imports(code, ".rs")
+    assert analysis["internal_domains"] == 3
+    assert "domain_0" in analysis["domain_list"]
+    assert "config_v2" in analysis["domain_list"]
+    assert "helpers" in analysis["domain_list"]
+
+
+def test_python_relative_import_is_internal():
+    """from .module import X should be internal."""
+    code = "from .domain_utils import helper\nfrom ..parent_mod import func\n"
+    analysis = analyze_imports(code, ".py")
+    assert analysis["internal_domains"] == 2
+    assert "domain_utils" in analysis["domain_list"]
+    assert "parent_mod" in analysis["domain_list"]
+
+
+def test_python_absolute_import_is_external():
+    """from unknown_lib import X (no leading dot) should be external."""
+    code = "from some_unknown_lib import helper\nimport another_lib\n"
+    analysis = analyze_imports(code, ".py")
+    assert analysis["internal_domains"] == 0
+    assert analysis["external_imports"] == 2
+
+
+def test_js_relative_import_is_internal():
+    """./foo/bar and ../foo/bar should be internal."""
+    code = (
+        "import { util } from './helpers/string';\n"
+        "import { api } from '../api/client';\n"
+    )
+    analysis = analyze_imports(code, ".js")
+    assert analysis["internal_domains"] == 2
+    assert "helpers" in analysis["domain_list"]
+    assert "api" in analysis["domain_list"]
+
+
+def test_js_bare_import_is_external():
+    """import from 'some-package' (no ./ or ../) should be external."""
+    code = "import express from 'express';\nimport lodash from 'lodash';\n"
+    analysis = analyze_imports(code, ".js")
+    assert analysis["internal_domains"] == 0
+    assert analysis["external_imports"] == 2
+
+
 def test_external_separation():
     """External imports should be counted separately from internal."""
     code = """

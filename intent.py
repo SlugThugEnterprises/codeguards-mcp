@@ -95,8 +95,3 @@ def get_intent_summary(intent: dict) -> str:
         lines.extend(_format_module_list(modules))
 
     return "\n".join(lines)
-
-
-def intent_context_for_guard(guard_name: str, intent: dict) -> str:
-    """Context for violations in a declared module."""
-    return ""

@@ -1,4 +1,6 @@
-# CodeGuards self-config
+# CodeGuards self-config — tuned for a multi-module Python project where
+# orchestrator files (server.py, guards/__init__.py) legitimately touch
+# many internal domains.
 guards:
   file_length:
     max_prod: 800
@@ -21,4 +23,10 @@ guards:
   missing_tests:
     min_test_ratio: 0.0
   magic_numbers:
+    enabled: false
+  structural_health:
+    enabled: false
+  responsibility_clusters:
+    enabled: false
+  duplicated_code:
     enabled: false

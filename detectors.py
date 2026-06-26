@@ -60,7 +60,7 @@ def detect_languages(project_root: str) -> list[str]:
                     found.add(lang)
                     break
 
-    # Fallback: scan source files (limit to first 200 files for speed)
+    # Fallback: scan source files (limit to first 2000 entries for speed)
     if not found:
         ext_counts: dict[str, int] = {}
         for i, f in enumerate(root.rglob("*")):
@@ -99,12 +99,12 @@ def relevant_file_globs(languages: list[str]) -> list[str]:
     return globs
 
 
-IGNORED_DIRS = {
+IGNORED_DIRS: frozenset[str] = frozenset({
     "node_modules", ".git", "target", "build", "dist", ".next",
     "__pycache__", ".venv", "venv", ".env", ".tox", ".eggs",
-    "vendor", ".cargo", "coverage", ".nyc_output", ".pytest_cache", ".pytest_cache",
+    "vendor", ".cargo", "coverage", ".nyc_output", ".pytest_cache",
     "plugins", "sample_code",
-}
+})
 
 
 def walk_source_files(project_root: str, extensions: set[str] | None = None) -> list[Path]:

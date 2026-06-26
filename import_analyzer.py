@@ -13,31 +13,39 @@ from pathlib import Path
 from typing import Optional
 
 
-# Language-specific import patterns (keyed by file extension)
+# Source regex strings — kept as documentable form, but never iterated
+# directly. ``_COMPILED_IMPORT_PATTERNS`` below is the hot path: every
+# regex is compiled exactly once at module load.
 _IMPORT_PATTERNS: dict[str, list[str]] = {
     # Rust: use crate::foo::bar;  use foo::bar;  use super::...
+    # is_internal captures crate:: or super:: prefix — when present,
+    # _extract_domain treats unknown names as internal; absent → external.
     ".rs": [
-        r"^\s*use\s+(crate\:\:)?(?P<path>[a-z_][a-z0-9_]*(?:\:\:[a-z_][a-z0-9_]*)*)",
+        r"^\s*use\s+(?:(?P<is_internal>crate\:\:|super\:\:))?(?P<path>[a-z_][a-z0-9_]*(?:\:\:[a-z_][a-z0-9_]*)*)",
     ],
     # Python: from .foo.bar import X   import foo.bar
+    # is_internal captures leading dot(s) — relative imports are internal.
     ".py": [
-        r"^\s*(?:from\s+)(?P<path>[a-z_][a-z0-9_.]*)\s+import",
-        r"^\s*import\s+(?P<path>[a-z_][a-z0-9_.]*)",
+        r"^\s*(?:from\s+)(?:(?P<is_internal>\.+))?(?P<path>[a-z_][a-z0-9_.]*)\s+import",
+        r"^\s*import\s+(?:(?P<is_internal>\.+))?(?P<path>[a-z_][a-z0-9_.]*)",
     ],
     # JS/TS: import X from './foo/bar'   require('./foo')
+    # is_internal captures ./ or ../ prefix — relative imports are internal.
     ".js": [
-        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?P<path>[^'\"]+)",
-        r"^\s*(?:const\s+\{[^}]*\}\s*=\s*require\()['\"](?P<path>[^'\"]+)",
+        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?:(?P<is_internal>\.\.?\/))?(?P<path>[^'\"]+)",
+        r"^\s*(?:const\s+\{[^}]*\}\s*=\s*require\()['\"](?:(?P<is_internal>\.\.?\/))?(?P<path>[^'\"]+)",
     ],
     ".ts": [
-        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?P<path>[^'\"]+)",
+        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?:(?P<is_internal>\.\.?\/))?(?P<path>[^'\"]+)",
     ],
     ".tsx": [
-        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?P<path>[^'\"]+)",
+        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?:(?P<is_internal>\.\.?\/))?(?P<path>[^'\"]+)",
     ],
     ".jsx": [
-        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?P<path>[^'\"]+)",
+        r"^\s*(?:import\s+(?:{[^}]*}|\*\s+as\s+\w+|\w+)\s+from\s+['\"])(?:(?P<is_internal>\.\.?\/))?(?P<path>[^'\"]+)",
     ],
+    # Go / Ruby — no is_internal capture; these languages don't distinguish
+    # project-internal vs external at the syntax level.
     # Go: import ( "foo/bar" )   or  import "foo/bar"
     ".go": [
         r"^\s*(?:\w+\s+)?\"(?P<path>[a-z][a-z0-9_/]*)\"",
@@ -49,10 +57,25 @@ _IMPORT_PATTERNS: dict[str, list[str]] = {
 }
 
 
-# Common namespaces that indicate concern domains
+# Pre-compiled once at import time. ``analyze_imports`` and
+# ``detect_layer_violations`` both call ``finditer`` on every source file,
+# so the difference between compile-per-call (~1ms each) and reuse is
+# significant on a repo with thousands of files.
+_COMPILED_IMPORT_PATTERNS: dict[str, list[re.Pattern]] = {
+    ext: [re.compile(pat, re.MULTILINE) for pat in patterns]
+    for ext, patterns in _IMPORT_PATTERNS.items()
+}
+
+
+# Project prefix aliases — match "app.db" → "db", "myproject.models" → "models".
+_PROJECT_PREFIXES: frozenset[str] = frozenset({
+    'app', 'src', 'lib', 'project', 'myapp', 'myproject', 'backend',
+})
+
+
+# Common namespaces that indicate concern domains.
 # If an import starts with one of these, use the first component as domain.
-# Otherwise, use "local" or "external" as domain.
-_DOMAIN_HINTS = {
+_DOMAIN_HINTS: frozenset[str] = frozenset({
     "crate", "models", "db", "database", "http", "api", "auth", "authn", "authz",
     "logging", "tracing", "telemetry", "config", "settings", "errors", "error",
     "events", "event", "messaging", "queue", "storage", "cache", "metrics",
@@ -67,11 +90,23 @@ _DOMAIN_HINTS = {
     "payment", "billing", "invoice", "subscription",
     "search", "index", "query",
     "template", "view", "render", "ui", "component",
-}
+})
 
 
-def _extract_domain(import_path: str, crate_name: str = "") -> Optional[str]:
+# Match valid identifier-like names: alpha start, then alphanumeric/underscore.
+# Replaces isalpha() which rejected domain_0, config_v2, api_v3, etc.
+_IDENT_LIKE_RE = re.compile(r'^[a-z][a-z0-9_]*$')
+
+
+def _extract_domain(import_path: str, crate_name: str = "",
+                    is_internal: bool = False) -> Optional[str]:
     """Extract the concern domain from an import path.
+
+    ``is_internal`` should be True when the import syntax indicates a
+    project-internal reference (e.g., ``crate::`` or ``super::`` in Rust,
+    a leading ``.`` in Python, ``./`` or ``../`` in JS).  When True,
+    unknown identifier-like names are treated as internal domains rather
+    than being collapsed into ``"external"``.
 
     Examples:
         crate::db::profiles::Profile → db
@@ -106,15 +141,12 @@ def _extract_domain(import_path: str, crate_name: str = "") -> Optional[str]:
             return parts[1].strip().lower()
         return None
 
-    # Project prefix aliases — match "app.db" → "db", "myproject.models" → "models"
-    PROJECT_PREFIXES = {'app', 'src', 'lib', 'project', 'myapp', 'myproject', 'backend'}
-
-    known_externals = _EXTERNAL_LIBS()
-    if first in known_externals or not first.isalpha():
+    if first in _EXTERNAL_LIBS or not _IDENT_LIKE_RE.match(first):
         return "external"
 
     # If first is a generic project prefix, use second component as domain
-    if first in PROJECT_PREFIXES and len(parts) > 1:
+    # ("app.db" → "db", "myproject.models" → "models").
+    if first in _PROJECT_PREFIXES and len(parts) > 1:
         domain = parts[1].strip().lower()
         return domain if domain in _DOMAIN_HINTS else domain  # still return it
 
@@ -126,29 +158,41 @@ def _extract_domain(import_path: str, crate_name: str = "") -> Optional[str]:
     if crate_name and first == crate_name.lower() and len(parts) > 1:
         return parts[1].strip().lower()
 
-    # Unknown = treat as external
+    # When the import syntax says "this is internal" (crate::, super::,
+    # .module, ./path, ../path), treat unknown names as project domains.
+    # Otherwise, unknown names are assumed external — avoids classifying
+    # bare ``use some_crate::Thing;`` as an internal domain.
+    if _IDENT_LIKE_RE.match(first):
+        return first if is_internal else "external"
+
+    # Genuinely unknown — treat as external
     return "external"
 
 
-def _EXTERNAL_LIBS() -> set:
-    """Known external crate/lib names — not project code."""
-    return {
-        'tokio', 'serde', 'std', 'anyhow', 'thiserror', 'clap', 'reqwest',
-        'axum', 'actix', 'rocket', 'chrono', 'regex', 'log', 'env_logger',
-        'rand', 'uuid', 'sqlx', 'diesel', 'sea_orm', 'redis', 'kafka',
-        'tonic', 'prost', 'tower', 'hyper', 'hyper_util', 'bytes', 'futures',
-        'async_trait', 'dashmap', 'parking_lot', 'crossbeam', 'rayon',
-        'openssl', 'rustls', 'native_tls', 'url', 'mime', 'mime_guess',
-        'base64', 'hex', 'sha2', 'hmac', 'config', 'jsonwebtoken', 'oauth2',
-        'reqwest', 'ureq', 'warp', 'tide', 'poem', 'lambda_runtime',
-        'opentelemetry', 'tracing_subscriber', 'metrics', 'lazy_static',
-        'once_cell', 'itertools', 'either', 'cfg_if',
-        'flask', 'django', 'fastapi', 'sqlalchemy', 'pydantic', 'pandas',
-        'numpy', 'requests', 'httpx', 'celery', 'pytest',
-        'express', 'react', 'vue', 'angular', 'next', 'nuxt', 'svelte',
-        'axios', 'lodash', 'moment', 'dayjs', 'prisma', 'typeorm',
-        'zod', 'yup', 'jest', 'vitest', 'mocha', 'cypress',
-    }
+# Module-level frozenset — allocated once, immutable, safe to share.
+_EXTERNAL_LIBS: frozenset[str] = frozenset({
+    # Rust / cross-language crates
+    'tokio', 'serde', 'std', 'anyhow', 'thiserror', 'clap', 'reqwest',
+    'axum', 'actix', 'rocket', 'chrono', 'regex', 'log', 'env_logger',
+    'rand', 'uuid', 'sqlx', 'diesel', 'sea_orm', 'redis', 'kafka',
+    'tonic', 'prost', 'tower', 'hyper', 'hyper_util', 'bytes', 'futures',
+    'async_trait', 'dashmap', 'parking_lot', 'crossbeam', 'rayon',
+    'openssl', 'rustls', 'native_tls', 'url', 'mime', 'mime_guess',
+    'base64', 'hex', 'sha2', 'hmac', 'config', 'jsonwebtoken', 'oauth2',
+    'reqwest', 'ureq', 'warp', 'tide', 'poem', 'lambda_runtime',
+    'opentelemetry', 'tracing_subscriber', 'metrics', 'lazy_static',
+    'once_cell', 'itertools', 'either', 'cfg_if',
+
+    # Python 3rd-party
+    'flask', 'django', 'fastapi', 'sqlalchemy', 'pydantic', 'pandas',
+    'numpy', 'requests', 'httpx', 'celery', 'pytest',
+    # JS/TS
+    'express', 'react', 'vue', 'angular', 'next', 'nuxt', 'svelte',
+    'axios', 'lodash', 'moment', 'dayjs', 'prisma', 'typeorm',
+    'zod', 'yup', 'jest', 'vitest', 'mocha', 'cypress',
+    # YAML (Python)
+    'yaml',
+})
 
 
 def analyze_imports(content: str, file_ext: str, crate_name: str = "") -> dict:
@@ -163,12 +207,12 @@ def analyze_imports(content: str, file_ext: str, crate_name: str = "") -> dict:
             "raw_imports": ["crate::db::profiles", ...],
         }
     """
-    patterns = _IMPORT_PATTERNS.get(file_ext, [])
+    patterns = _COMPILED_IMPORT_PATTERNS.get(file_ext, [])
     domains: dict[str, int] = {}
     raw_imports: list[str] = []
 
     for pat in patterns:
-        for m in re.compile(pat, re.MULTILINE).finditer(content):
+        for m in pat.finditer(content):
             import_path = m.group("path")
             if not import_path:
                 continue
@@ -178,7 +222,9 @@ def analyze_imports(content: str, file_ext: str, crate_name: str = "") -> dict:
             if line.startswith("#[cfg(test)]") or "@pytest" in line or "test(" in line:
                 continue
 
-            domain = _extract_domain(import_path, crate_name) or "unknown"
+            is_internal = bool(m.groupdict().get("is_internal"))
+            domain = _extract_domain(import_path, crate_name,
+                                     is_internal=is_internal) or "unknown"
             domains[domain] = domains.get(domain, 0) + 1
             raw_imports.append(import_path)
 
@@ -208,7 +254,7 @@ def detect_layer_violations(
         layers: dict mapping layer-name → allowed imports from
             e.g. {"service": ["domain"], "api": ["service", "domain"]}
     """
-    patterns = _IMPORT_PATTERNS.get(file_ext, [])
+    patterns = _COMPILED_IMPORT_PATTERNS.get(file_ext, [])
     violations = []
 
     # Determine what layer this file belongs to based on its path
@@ -222,9 +268,11 @@ def detect_layer_violations(
         return []
 
     for pat in patterns:
-        for m in re.compile(pat, re.MULTILINE).finditer(content):
+        for m in pat.finditer(content):
             import_path = m.group("path")
-            domain = _extract_domain(import_path)
+            is_internal = bool(m.groupdict().get("is_internal"))
+            domain = _extract_domain(import_path,
+                                     is_internal=is_internal)
             if not domain or domain in ("external", "unknown"):
                 continue
             if domain not in allowed and domain != file_layer:

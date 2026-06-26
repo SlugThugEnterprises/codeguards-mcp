@@ -6,3 +6,9 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Runtime / test artifacts
+.coverage
+.codeguards/
+.pytest_cache/
+

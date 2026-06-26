@@ -11,3 +11,11 @@ dependencies = [
     "mcp",
     "pyyaml",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "starlette",
+    "uvicorn",
+]

@@ -30,6 +30,65 @@ try:
 except ImportError:
     HAS_MCP = False
 
+    # Stub classes so the module can be imported (and tested) even
+    # when the MCP SDK is not installed. Handlers still return valid
+    # TextContent-like objects; TOOL_DEFINITIONS is a list of dicts.
+    class TextContent:
+        def __init__(self, type: str = "", text: str = ""):
+            self.type = type
+            self.text = text
+
+        def __repr__(self):
+            return f"TextContent(type={self.type!r}, text={self.text!r})"
+
+    class Tool:
+        def __init__(self, name: str = "", description: str = "", inputSchema: dict | None = None):
+            self.name = name
+            self.description = description
+            self.inputSchema = inputSchema or {}
+
+
+# ──────────────────────────────────────────────
+# Sandbox — reject path arguments that target credential stores, kernel
+# filesystems, or non-existent locations. Returns (ok, resolved_or_reason).
+# ──────────────────────────────────────────────
+
+from pathlib import Path as _Path
+
+_SANDBOX_DENY_TOKENS = (
+    ".aws", ".ssh", ".kube", ".docker", ".npmrc", ".netrc",
+    ".pypirc", ".git-credentials", ".gitconfig",
+)
+_SANDBOX_DENY_PREFIXES = (
+    "/proc", "/sys", "/dev", "/boot", "/var/log", "/var/run",
+)
+
+
+def _is_safe_project_path(path_arg: str) -> tuple[bool, str]:
+    """Validate an MCP-supplied path before any file I/O is performed.
+
+    Rejects paths into credential stores (``~/.aws``, ``~/.ssh``, ...),
+    kernel filesystems (``/proc``, ``/sys``, ``/dev``), and non-existent
+    locations. Resolves ``..`` and symlinks first so a request like
+    ``/tmp/escape/../../etc`` cannot bypass the deny-list.
+    """
+    try:
+        resolved = _Path(path_arg).resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        return (False, f"Refused: cannot resolve path: {e}")
+
+    s = str(resolved).lower()
+    for tok in _SANDBOX_DENY_TOKENS:
+        if tok in s:
+            return (False, f"Refused: path contains credential store segment: {tok}")
+    for prefix in _SANDBOX_DENY_PREFIXES:
+        if s == prefix or s.startswith(prefix + "/"):
+            return (False, f"Refused: path is under restricted system dir: {prefix}")
+
+    if not resolved.exists():
+        return (False, f"Refused: path does not exist: {resolved}")
+    return (True, str(resolved))
+
 
 # ──────────────────────────────────────────────
 # Tool handlers — one async function per tool
@@ -38,7 +97,9 @@ except ImportError:
 
 async def handle_check_project(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
     from intent import has_intent
-    path = arguments["path"]
+    ok, path = _is_safe_project_path(arguments["path"])
+    if not ok:
+        return [TextContent(type="text", text=path)]
     if not has_intent(path):
         return [TextContent(type="text", text=(
             "I don't know what you're building yet.\n\n"
@@ -71,7 +132,13 @@ async def handle_check_project(registry: GuardRegistry, arguments: dict) -> list
 
 async def handle_check_file(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
     file_path = arguments["path"]
-    project_root = arguments.get("project_root", os.path.dirname(file_path))
+    ok, file_path = _is_safe_project_path(file_path)
+    if not ok:
+        return [TextContent(type="text", text=file_path)]
+    project_root_arg = arguments.get("project_root", os.path.dirname(file_path))
+    ok, project_root = _is_safe_project_path(project_root_arg)
+    if not ok:
+        return [TextContent(type="text", text=f"project_root: {project_root}")]
     config = load_config(project_root)
     languages = detect_languages(project_root)
 
@@ -110,7 +177,9 @@ async def handle_check_file(registry: GuardRegistry, arguments: dict) -> list[Te
 
 
 async def handle_detect_languages(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
-    path = arguments["path"]
+    ok, path = _is_safe_project_path(arguments["path"])
+    if not ok:
+        return [TextContent(type="text", text=path)]
     languages = detect_languages(path)
     return [TextContent(type="text", text=json.dumps({"languages": languages, "detected_at": path}, indent=2))]
 
@@ -149,7 +218,9 @@ async def handle_list_guards(registry: GuardRegistry, arguments: dict) -> list[T
 
 async def handle_declare_intent(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
     from intent import save_intent, get_intent_summary
-    project_path = arguments["path"]
+    ok, project_path = _is_safe_project_path(arguments["path"])
+    if not ok:
+        return [TextContent(type="text", text=project_path)]
     intent_data = {
         "modules": arguments.get("modules", []),
         "global": arguments.get("global", {}),
@@ -167,7 +238,9 @@ async def handle_declare_intent(registry: GuardRegistry, arguments: dict) -> lis
 
 async def handle_save_baseline(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
     from guards.structural import save_structural_baseline
-    project_path = arguments["path"]
+    ok, project_path = _is_safe_project_path(arguments["path"])
+    if not ok:
+        return [TextContent(type="text", text=project_path)]
     baseline = save_structural_baseline(project_path)
     return [TextContent(type="text", text=(
         f"Structural baseline saved with {len(baseline)} files. "
@@ -229,7 +302,9 @@ async def handle_plan(registry: GuardRegistry, arguments: dict) -> list[TextCont
     """Generate a structured project plan from declared intent."""
     from intent import load_intent
     from planning import create_architecture, create_plan, get_pending_tasks
-    path = arguments["path"]
+    ok, path = _is_safe_project_path(arguments["path"])
+    if not ok:
+        return [TextContent(type="text", text=path)]
 
     intent = load_intent(path)
     if not intent:
@@ -258,7 +333,9 @@ async def handle_plan(registry: GuardRegistry, arguments: dict) -> list[TextCont
 async def handle_update_task(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
     """Mark a task complete or update its status."""
     from planning import update_task, get_pending_tasks
-    path = arguments["path"]
+    ok, path = _is_safe_project_path(arguments["path"])
+    if not ok:
+        return [TextContent(type="text", text=path)]
     task_id = arguments["task_id"]
     status = arguments.get("status", "completed")
 
@@ -276,7 +353,9 @@ async def handle_update_task(registry: GuardRegistry, arguments: dict) -> list[T
 async def handle_list_tasks(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
     """Show pending tasks."""
     from planning import get_pending_tasks
-    path = arguments["path"]
+    ok, path = _is_safe_project_path(arguments["path"])
+    if not ok:
+        return [TextContent(type="text", text=path)]
     pending = get_pending_tasks(path)
     if not pending:
         return [TextContent(type="text", text="No pending tasks. All caught up!")]
