@@ -2,37 +2,35 @@
 
 **Dynamic architecture contracts for AI-assisted software development.**
 
-CodeGuards is an MCP server that helps an AI coding agent plan with the user,
-turn that plan into an enforceable architecture contract, and check future code
-against that contract so the project does not drift as the conversation gets
-longer.
+CodeGuards exists to help AI start with a good architecture, preserve that
+architecture as development evolves, and reduce downstream friction by nudging
+the AI toward better engineering practices from the beginning.
 
-It is not trying to be the linter people use. Linters, Clippy, formatters,
-security scanners, and type checkers still matter. CodeGuards works one layer
-upstream: it helps the agent get the structure right, then uses focused guard
-checks to push the generated code toward the project's agreed direction before
-normal tools get their turn.
+It moves architectural decisions out of fragile prompt history and into an
+executable contract that continuously guides AI-generated code.
 
 ```text
-User explains what they want to build
+1. Planning
         ↓
-CodeGuards guides the planning conversation
+2. Architecture Contract
         ↓
-The AI writes an architecture contract for this project
+3. AI Development
         ↓
-CodeGuards derives guard behavior from that contract
+4. Continuous Architecture Enforcement
         ↓
-The AI writes code
-        ↓
-CodeGuards checks whether the code still matches the user's plan
-        ↓
-The AI fixes drift and obvious quality issues before they spread
+5. Existing Toolchain: Clippy, Ruff, tests, CI
 ```
 
-A normal linter asks, "Does this code match a generic rule?"
+CodeGuards sits **before** traditional tooling.
 
-CodeGuards asks, "Does this code still match the architecture and constraints the
-user chose for this project?"
+Not beside it.
+
+Not after it.
+
+Before it.
+
+Compilers catch mistakes. Linters catch language issues. CodeGuards catches
+design drift.
 
 ---
 
@@ -56,14 +54,35 @@ That is architectural drift. The design decision still exists somewhere in chat
 history, but the agent no longer has a compact, enforceable contract in front of
 it.
 
-CodeGuards externalizes that contract and makes it executable.
+Humans naturally remember decisions like:
+
+```text
+Business logic lives in services.
+Controllers do not talk directly to repositories.
+Domain code does not import infrastructure.
+```
+
+AI does not reliably preserve those decisions across long implementation
+sessions. Repeating the same reminder in every prompt is brittle.
+
+CodeGuards changes the loop from:
+
+```text
+Remember to keep business logic out of controllers.
+```
+
+to:
+
+```text
+That decision has been recorded. CodeGuards will enforce it.
+```
 
 ---
 
 ## Product identity
 
-CodeGuards is an **architecture contract system**, not a one-size-fits-all code
-quality MCP.
+CodeGuards is an **architecture-first development system for AI agents**, not a
+one-size-fits-all linter MCP.
 
 It helps an AI agent:
 
@@ -71,16 +90,97 @@ It helps an AI agent:
 2. capture the user's architecture and quality decisions,
 3. materialize those decisions into project-local files,
 4. derive guard behavior from the architecture contract,
-5. return structured, actionable violations that point back to the user's plan.
+5. return structured, actionable violations that point back to the user's plan,
+6. reduce friction before the normal toolchain runs.
 
-The supporting lint-style checks are useful, but they are not the identity of the
-project. They exist to reduce the amount of bad generated code that reaches the
-normal toolchain.
+The supporting hygiene checks are useful, but they are not the identity of the
+project. They exist to reduce the amount of bad generated code that reaches
+Clippy, Ruff, tests, CI, reviewers, or humans.
 
 For Rust, for example, the goal is not to replace `cargo clippy`. The goal is to
 make the first AI-generated Clippy run less noisy by catching common agent habits
-earlier: `.unwrap()` spam, missing tracing on async entry points, oversized files,
-poor module boundaries, and drift from the architecture the user chose.
+earlier: `.unwrap()` spam, missing tracing on async entry points, oversized
+files, poor module boundaries, and drift from the architecture the user chose.
+
+---
+
+## Planning Mode
+
+The architecture interview is the key workflow.
+
+Instead of:
+
+```text
+User: Build me an ERP.
+        ↓
+AI: Starts writing code.
+```
+
+CodeGuards pushes the process toward:
+
+```text
+User: Build me an ERP.
+        ↓
+AI: Let's spend a few minutes designing the architecture.
+        ↓
+CodeGuards Planning captures the decisions.
+        ↓
+ARCHITECTURE.md is generated.
+        ↓
+Project-specific guard behavior is derived from the contract.
+        ↓
+Implementation begins.
+```
+
+A greenfield Planning Mode might look like:
+
+```text
+CodeGuards Planning
+
+Project Type:
+✓ REST API
+
+Architecture:
+✓ Layered
+
+Persistence:
+✓ PostgreSQL
+
+Dependency Rules:
+✓ Controllers → Services only
+✓ Domain must not import Infrastructure
+
+Quality Goals:
+✓ Strong tests
+✓ Structured logging
+✓ No God Objects
+
+Generate Architecture Contract?
+```
+
+When the user says yes:
+
+1. `.codeguards/intent.json` is created,
+2. `.planning/ARCHITECTURE.md` is created,
+3. `.planning/PROJECT_PLAN.md` is created,
+4. the MCP derives project-specific guard behavior,
+5. every future coding request can be checked against the contract.
+
+That changes the conversation from:
+
+```text
+Why did the AI write messy code?
+```
+
+to:
+
+```text
+Did we define the architecture well enough before implementation started?
+```
+
+Good architects do not usually start by writing classes. They start by agreeing
+on constraints, boundaries, dependencies, and tradeoffs. CodeGuards brings that
+habit into AI-assisted development.
 
 ---
 
@@ -93,6 +193,7 @@ poor module boundaries, and drift from the architecture the user chose.
 | Mostly reports style failures | Reports drift from agreed architecture |
 | Easy for agents to treat as busywork | Tells the agent which design decision it violated |
 | Passive documentation is optional | The contract is part of the build workflow |
+| Usually runs after code exists | Shapes the code before traditional tooling sees it |
 
 CodeGuards can still run baseline guards: file size, function size, TODOs,
 credentials, `unwrap`, tracing, tests, and structural heuristics. Those checks
@@ -621,6 +722,7 @@ Near-term direction:
   architecture contract.
 - Add an `ArchitectureContractGuard` that evaluates contract data rather than
   creating many one-off rule implementations.
+- Add Planning Mode as the signature greenfield workflow.
 - Add architecture profiles such as layered, clean, and hexagonal.
 - Generate contract constraints from the user's planning choices, not from a
   universal checklist.
@@ -632,6 +734,7 @@ Near-term direction:
 
 Long-term identity:
 
-> CodeGuards helps establish an architecture at project inception, records that
-> architecture as an executable contract, and continuously verifies that
-> AI-generated code does not drift away from the user's agreed design.
+> CodeGuards moves architectural decisions from fragile prompt history into an
+> executable contract that continuously guides AI-generated code, while applying
+> just enough engineering pressure to reduce friction with the rest of the
+> development toolchain.
