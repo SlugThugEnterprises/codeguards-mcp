@@ -58,15 +58,23 @@ def run_checks(
 
     source_files = walk_source_files(project_root)
 
+    from detectors import is_third_party
+
     for sf in source_files:
         try:
             content = sf.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
 
+        third_party = is_third_party(sf, project_root, config)
+
         # Run generic guards always
         for name, check_fn in _GENERIC_CHECKS.items():
             if name not in guards_cfg:
+                continue
+            # If the file is third-party code, exclude it from code quality checks
+            # but do NOT exclude it from dependency risk reviews (credentials, unsafe_patterns)
+            if third_party and name not in ("credentials", "unsafe_patterns"):
                 continue
             try:
                 violations.extend(check_fn(sf, content, guards_cfg[name]))
@@ -79,38 +87,40 @@ def run_checks(
                 })
 
         # Run structural checks: responsibility clusters, fan-out, layer enforcement
-        for sname, sfn in structural.STRUCTURAL_CHECKS.items():
-            scfg = guards_cfg.get(sname, {})
-            if not scfg.get("enabled", True):
-                continue
-            try:
-                violations.extend(sfn(sf, content, scfg))
-            except Exception as e:
-                violations.append({
-                    "file": str(sf), "line": 0,
-                    "message": f"Structural guard {sname} error: {e}",
-                    "guard": "error",
-                })
+        if not third_party:
+            for sname, sfn in structural.STRUCTURAL_CHECKS.items():
+                scfg = guards_cfg.get(sname, {})
+                if not scfg.get("enabled", True):
+                    continue
+                try:
+                    violations.extend(sfn(sf, content, scfg))
+                except Exception as e:
+                    violations.append({
+                        "file": str(sf), "line": 0,
+                        "message": f"Structural guard {sname} error: {e}",
+                        "guard": "error",
+                    })
 
         # Run plugin guards that match this file's language
-        for guard in registry.guards:
-            guard_langs = guard.get("languages", [])
-            guard_exts = guard.get("file_extensions", set())
-            if guard_exts and sf.suffix not in guard_exts:
-                continue
-            if guard_langs and not any(l in languages for l in guard_langs):
-                continue
+        if not third_party:
+            for guard in registry.guards:
+                guard_langs = guard.get("languages", [])
+                guard_exts = guard.get("file_extensions", set())
+                if guard_exts and sf.suffix not in guard_exts:
+                    continue
+                if guard_langs and not any(l in languages for l in guard_langs):
+                    continue
 
-            guard_name = guard["name"]
-            try:
-                violations.extend(guard["check_fn"](sf, content, guards_cfg.get(guard_name, {})))
-            except Exception as e:
-                violations.append({
-                    "file": str(sf),
-                    "line": 0,
-                    "message": f"Guard {guard_name} error: {e}",
-                    "guard": "error",
-                })
+                guard_name = guard["name"]
+                try:
+                    violations.extend(guard["check_fn"](sf, content, guards_cfg.get(guard_name, {})))
+                except Exception as e:
+                    violations.append({
+                        "file": str(sf),
+                        "line": 0,
+                        "message": f"Guard {guard_name} error: {e}",
+                        "guard": "error",
+                    })
 
     # Project-level checks
     check_missing_tests(project_root, config, violations)
@@ -147,7 +157,11 @@ def check_missing_tests(project_root: str, config: dict, violations: list[dict])
     source_count = 0
     untested: list = []
 
+    from detectors import is_third_party
+
     for sf in walk_source_files(project_root):
+        if is_third_party(sf, project_root, config):
+            continue
         ext = sf.suffix
         if ext not in ext_to_test_exts:
             continue

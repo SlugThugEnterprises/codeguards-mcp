@@ -102,12 +102,78 @@ def relevant_file_globs(languages: list[str]) -> list[str]:
 IGNORED_DIRS: frozenset[str] = frozenset({
     "node_modules", ".git", "target", "build", "dist", ".next",
     "__pycache__", ".venv", "venv", ".env", ".tox", ".eggs",
-    "vendor", ".cargo", "coverage", ".nyc_output", ".pytest_cache",
+    ".cargo", "coverage", ".nyc_output", ".pytest_cache",
     "plugins", "sample_code",
 })
 
+THIRD_PARTY_DIRS: frozenset[str] = frozenset({
+    "third_party", "thirdparty", "3rdparty", "3rd_party", "external",
+    "extern", "vendor",
+})
 
-def walk_source_files(project_root: str, extensions: set[str] | None = None) -> list[Path]:
+
+_THIRD_PARTY_CACHE: dict[Path, bool] = {}
+
+
+def is_third_party(path: Path, project_root: str, config: dict) -> bool:
+    """Check if a file path belongs to third-party/vendor code."""
+    root = Path(project_root)
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path
+    parts = rel.parts
+
+    # Check default third-party folder names
+    if any(p in THIRD_PARTY_DIRS for p in parts):
+        return True
+
+    # Check custom ignored_dirs from config
+    custom_ignored = config.get("ignored_dirs", [])
+    if any(p in custom_ignored for p in parts):
+        return True
+
+    # Check custom ignored_patterns from config
+    ignored_patterns = config.get("ignored_patterns", [])
+    if ignored_patterns:
+        for pat in ignored_patterns:
+            if rel.match(pat) or (pat.startswith("**/") and rel.match(pat[3:])):
+                return True
+
+    # Traverse parent folders to root to detect LICENSE/package manager markers
+    parent = path.parent
+    while parent != root and parent != parent.parent:
+        if parent in _THIRD_PARTY_CACHE:
+            if _THIRD_PARTY_CACHE[parent]:
+                return True
+            parent = parent.parent
+            continue
+
+        is_tp = False
+        markers = [
+            ".git", "LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING",
+            "Cargo.toml", "package.json", "go.mod", "Gemfile", "pyproject.toml",
+            "setup.py", "build.gradle", "pom.xml"
+        ]
+        for marker in markers:
+            if (parent / marker).exists():
+                is_tp = True
+                break
+
+        _THIRD_PARTY_CACHE[parent] = is_tp
+        if is_tp:
+            return True
+        parent = parent.parent
+
+    return False
+
+
+def walk_source_files(
+    project_root: str,
+    extensions: set[str] | None = None,
+    custom_ignored_dirs: set[str] | None = None,
+    ignored_patterns: list[str] | None = None,
+) -> list[Path]:
     """Walk source files in a project, skipping ignored dirs and non-code files."""
     if extensions is None:
         # Only process common source code extensions
@@ -119,7 +185,7 @@ def walk_source_files(project_root: str, extensions: set[str] | None = None) -> 
     root = Path(project_root)
     files = []
     for f in root.rglob("*"):
-        # Skip ignored dirs
+        # Skip system/build/cache ignored dirs
         rel = f.relative_to(root)
         parts = rel.parts
         if any(p in IGNORED_DIRS for p in parts):

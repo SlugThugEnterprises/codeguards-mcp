@@ -137,6 +137,52 @@ def test_walk_without_extensions_uses_defaults(tmp_path):
     assert "main.py" in names
 
 
+def test_is_third_party(tmp_path):
+    from detectors import is_third_party
+    config = {
+        "ignored_dirs": ["custom_ignored"],
+        "ignored_patterns": ["**/vnc/*", "vnc.rs"]
+    }
+
+    # Check default third_party folders
+    assert is_third_party(Path("third_party/foo.py"), str(tmp_path), config) is True
+    assert is_third_party(Path("vendor/bar.rs"), str(tmp_path), config) is True
+
+    # Check custom ignored_dirs
+    assert is_third_party(Path("custom_ignored/baz.py"), str(tmp_path), config) is True
+
+    # Check custom ignored_patterns
+    assert is_third_party(Path("vnc/foo.py"), str(tmp_path), config) is True
+    assert is_third_party(Path("vnc.rs"), str(tmp_path), config) is True
+
+    # Check normal first-party files
+    assert is_third_party(Path("src/main.py"), str(tmp_path), config) is False
+
+
+def test_auto_detect_third_party(tmp_path):
+    from detectors import is_third_party
+    config = {}
+
+    # Create a submodule folder with a .git file
+    sub_dir = tmp_path / "my_submodule"
+    sub_dir.mkdir()
+    (sub_dir / ".git").write_text("gitdir: ../.git/modules/my_submodule")
+
+    # Create a vendored library folder with a LICENSE file
+    vendor_lib = tmp_path / "libs" / "some_lib"
+    vendor_lib.mkdir(parents=True)
+    (vendor_lib / "LICENSE").write_text("MIT License")
+
+    # Create normal first-party code
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+
+    # Check assertions
+    assert is_third_party(sub_dir / "lib.rs", str(tmp_path), config) is True
+    assert is_third_party(vendor_lib / "some_lib.py", str(tmp_path), config) is True
+    assert is_third_party(src_dir / "main.py", str(tmp_path), config) is False
+
+
 def test_ignored_dirs_is_frozenset():
     assert isinstance(IGNORED_DIRS, frozenset)
 
@@ -146,3 +192,5 @@ def test_ignored_dirs_contains_expected():
     assert "node_modules" in IGNORED_DIRS
     assert ".git" in IGNORED_DIRS
     assert "target" in IGNORED_DIRS
+    assert "third_party" not in IGNORED_DIRS
+    assert "thirdparty" not in IGNORED_DIRS

@@ -148,8 +148,13 @@ async def handle_check_file(registry: GuardRegistry, arguments: dict) -> list[Te
         return [TextContent(type="text", text=f"Error reading {file_path}: {e}")]
 
     from guards.generic import ALL_GENERIC_CHECKS
+    from detectors import is_third_party
+    third_party = is_third_party(Path(file_path), project_root, config)
+
     violations = []
     for guard_name, check_fn in ALL_GENERIC_CHECKS.items():
+        if third_party and guard_name not in ("credentials", "unsafe_patterns"):
+            continue
         guard_cfg = config.get("guards", {}).get(guard_name, {})
         try:
             violations.extend(check_fn(Path(file_path), content, guard_cfg))
@@ -160,18 +165,19 @@ async def handle_check_file(registry: GuardRegistry, arguments: dict) -> list[Te
                 "guard": "error",
             })
 
-    for guard in registry.guards:
-        guard_langs = guard.get("languages", [])
-        if guard_langs and not any(l in languages for l in guard_langs):
-            continue
-        try:
-            violations.extend(guard["check_fn"](Path(file_path), content, {}))
-        except Exception as e:
-            violations.append({
-                "file": file_path, "line": 0,
-                "message": f"Guard {guard['name']} error: {e}",
-                "guard": "error",
-            })
+    if not third_party:
+        for guard in registry.guards:
+            guard_langs = guard.get("languages", [])
+            if guard_langs and not any(l in languages for l in guard_langs):
+                continue
+            try:
+                violations.extend(guard["check_fn"](Path(file_path), content, {}))
+            except Exception as e:
+                violations.append({
+                    "file": file_path, "line": 0,
+                    "message": f"Guard {guard['name']} error: {e}",
+                    "guard": "error",
+                })
 
     return [TextContent(type="text", text=format_report(file_path, violations, languages, config))]
 

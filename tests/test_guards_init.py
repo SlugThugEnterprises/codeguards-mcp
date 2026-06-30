@@ -259,3 +259,42 @@ def test_missing_tests_with_matching_tests(tmp_path):
 
     # 2 source files, 1 has test → 50% > 30% → no violation
     assert violations == []
+
+
+def test_run_checks_on_third_party(tmp_path):
+    from guards import run_checks, GuardRegistry
+
+    # Create a 3rd party file with quality violations and a security violation
+    vnc_dir = tmp_path / "third_party"
+    vnc_dir.mkdir()
+
+    # Credentials (security check) + deep nesting (quality check)
+    code = """
+fn very_deeply_nested_function() {
+    if true {
+        if true {
+            if true {
+                if true {
+                    let key = "AKIA1234567890123456"; // AWS access key
+                }
+            }
+        }
+    }
+}
+"""
+    (vnc_dir / "vnc.rs").write_text(code)
+
+    import copy
+    from config import DEFAULTS
+    config = copy.deepcopy(DEFAULTS)
+    config["guards"]["credentials"]["enabled"] = True
+    config["guards"]["deep_nesting"] = {"enabled": True, "max_depth": 3}
+
+    registry = GuardRegistry()
+    violations = run_checks(str(tmp_path), config, registry)
+
+    # Should flag credentials (dependency risk check)
+    # but NOT deep_nesting (code quality/maintainability check)
+    guards_flagged = [v["guard"] for v in violations]
+    assert "credentials" in guards_flagged
+    assert "deep_nesting" not in guards_flagged

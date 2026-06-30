@@ -7,6 +7,8 @@ import constants
 
 
 DEFAULTS = {
+    "ignored_dirs": [],
+    "ignored_patterns": [],
     "guards": {
         "file_length": {"enabled": True, "max_prod": constants.MAX_PROD_LINES, "max_test": constants.MAX_TEST_LINES},
         "function_length": {"enabled": True, "max": constants.MAX_FN_LINES},

@@ -259,9 +259,15 @@ def _check_cosmetic_fix(
 def save_structural_baseline(project_root: str):
     """Snapshot current structural state for future growth_drift comparison."""
     from detectors import walk_source_files
+    from config import load_config
+
+    config = load_config(project_root)
+    from detectors import is_third_party
 
     baseline = {}
     for sf in walk_source_files(project_root):
+        if is_third_party(sf, project_root, config):
+            continue
         try:
             content = sf.read_text(encoding="utf-8", errors="replace")
         except Exception:

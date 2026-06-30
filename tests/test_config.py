@@ -62,6 +62,28 @@ guards:
     assert cfg["guards"]["file_length"]["enabled"] is True
 
 
+def test_load_config_with_ignored_dirs(tmp_path):
+    """YAML ignored_dirs overrides DEFAULTS."""
+    yaml_path = tmp_path / ".codeguards.yaml"
+    yaml_path.write_text("""
+ignored_dirs:
+  - my_custom_third_party
+""")
+    cfg = load_config(str(tmp_path))
+    assert cfg["ignored_dirs"] == ["my_custom_third_party"]
+
+
+def test_load_config_with_ignored_patterns(tmp_path):
+    """YAML ignored_patterns overrides DEFAULTS."""
+    yaml_path = tmp_path / ".codeguards.yaml"
+    yaml_path.write_text("""
+ignored_patterns:
+  - "**/vnc/**"
+""")
+    cfg = load_config(str(tmp_path))
+    assert cfg["ignored_patterns"] == ["**/vnc/**"]
+
+
 def test_load_config_empty_yaml_returns_defaults(tmp_path):
     """Empty .codeguards.yaml still returns DEFAULTS."""
     yaml_path = tmp_path / ".codeguards.yaml"
