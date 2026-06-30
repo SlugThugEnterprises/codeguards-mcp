@@ -6,6 +6,8 @@ It exists to help AI start with a good architecture, preserve that architecture 
 
 CodeGuards is not trying to be the linter people use. Linters, Clippy, Ruff, formatters, tests, security scanners, and CI still matter. CodeGuards sits before them.
 
+For the detailed v0.2 system model, file contracts, plugin standard, and runtime guarantees, see [`docs/V0.2_ARCHITECTURE_SPEC.md`](docs/V0.2_ARCHITECTURE_SPEC.md).
+
 ```text
 Intent
   what are we building?
