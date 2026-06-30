@@ -1,57 +1,486 @@
 # CodeGuards
 
-**Code governance for AI coding agents.** An MCP server that enforces code
-quality rules against the architecture your project declared — so your AI
-*plans before it builds*.
+**CodeGuards is an MCP server that turns AI coding intent into an enforceable architecture contract and continuously prevents drift as code is generated.**
 
-CodeGuards is the front-half that asks what you're building and the back-half
-that holds your code to that decision.
+It exists to help AI start with a good architecture, preserve that architecture as development evolves, and reduce downstream friction by nudging the AI toward better engineering practices from the beginning.
+
+CodeGuards is not trying to be the linter people use. Linters, Clippy, Ruff, formatters, tests, security scanners, and CI still matter. CodeGuards sits before them.
+
+For the detailed v0.2 system model, file contracts, plugin standard, and runtime guarantees, see [`docs/V0.2_ARCHITECTURE_SPEC.md`](docs/V0.2_ARCHITECTURE_SPEC.md).
+
+```text
+Intent
+  what are we building?
+        ↓
+Architecture
+  how is it structured?
+        ↓
+Plan
+  how will we implement it?
+        ↓
+Code
+  AI generates the change
+        ↓
+Guards enforce alignment
+  CodeGuards catches design drift
+        ↓
+AI fixes drift
+  before Clippy, Ruff, tests, CI, reviewers, or humans get the mess
+```
+
+Compilers catch mistakes. Linters catch language issues. CodeGuards catches design drift.
 
 ---
 
-## How it works
+## Why this exists
 
-**The enforce-order is enforced.** This is the part that matters:
+AI coding agents can usually start a project cleanly. They can discuss structure, choose modules, sketch tests, and follow the user's preferences for the first set of changes.
 
+The failure mode appears later:
+
+```text
+Prompt 1:   Use a service layer.
+Prompt 12:  Add authentication.
+Prompt 31:  Add billing.
+Prompt 58:  Add reporting.
+Prompt 90:  The AI bypasses the service layer because it is faster.
 ```
+
+That is architectural drift. The decision still exists somewhere in chat history, but the agent no longer has a compact, enforceable contract in front of it.
+
+Humans naturally remember decisions like:
+
+```text
+Business logic lives in services.
+Controllers do not talk directly to repositories.
+Domain code does not import infrastructure.
+```
+
+AI does not reliably preserve those decisions across long implementation sessions. Repeating the same reminder in every prompt is brittle.
+
+CodeGuards changes the loop from:
+
+```text
+Remember to keep business logic out of controllers.
+```
+
+to:
+
+```text
+That decision has been recorded. CodeGuards will enforce it.
+```
+
+---
+
+## What CodeGuards is
+
+CodeGuards is a **staged architecture enforcement lifecycle for AI coding agents**.
+
+The core lifecycle is:
+
+```text
+probe → declare_intent → plan → update_task → check_project
+```
+
+That lifecycle creates a clean hierarchy:
+
+| Layer | File/tool | Meaning |
+|---|---|---|
+| Intent | `.codeguards/intent.json` | Why are we building this, and what direction did the user choose? |
+| Architecture | `.planning/ARCHITECTURE.md` | How is the system structured, and what constraints must remain true? |
+| Plan | `.planning/PROJECT_PLAN.md` | How will implementation proceed? |
+| Guards | `check_project` | Does the generated code still align with the contract? |
+
+`check_project` refuses to run without `.codeguards/intent.json`. That is not just a feature; it is the boundary that prevents architecture-less execution.
+
+No intent, no full-project enforcement.
+
+---
+
+## Planning Mode
+
+The architecture interview is the key workflow.
+
+Instead of:
+
+```text
+User: Build me an ERP.
+        ↓
+AI: Starts writing code.
+```
+
+CodeGuards pushes the process toward:
+
+```text
+User: Build me an ERP.
+        ↓
+AI: Let's spend a few minutes designing the architecture.
+        ↓
+CodeGuards Planning captures the decisions.
+        ↓
+ARCHITECTURE.md is generated.
+        ↓
+Project-specific guard behavior is derived from the contract.
+        ↓
+Implementation begins.
+```
+
+A greenfield Planning Mode might look like:
+
+```text
+CodeGuards Planning
+
+Project Type:
+✓ REST API
+
+Architecture:
+✓ Layered
+
+Persistence:
+✓ PostgreSQL
+
+Dependency Rules:
+✓ Controllers → Services only
+✓ Domain must not import Infrastructure
+
+Quality Goals:
+✓ Strong tests
+✓ Structured logging
+✓ No God Objects
+
+Generate Architecture Contract?
+```
+
+When the user says yes:
+
+1. `.codeguards/intent.json` is created,
+2. `.planning/ARCHITECTURE.md` is created,
+3. `.planning/PROJECT_PLAN.md` is created,
+4. the MCP derives project-specific guard behavior,
+5. every future coding request can be checked against the contract.
+
+That changes the conversation from:
+
+```text
+Why did the AI write messy code?
+```
+
+to:
+
+```text
+Did we define the architecture well enough before implementation started?
+```
+
+Good architects do not usually start by writing classes. They start by agreeing on constraints, boundaries, dependencies, and tradeoffs. CodeGuards brings that habit into AI-assisted development.
+
+---
+
+## Greenfield and existing-project modes
+
+CodeGuards is useful in two modes.
+
+### Greenfield mode
+
+For a new project, CodeGuards should run the strict lifecycle from the start:
+
+```text
+probe → declare_intent → plan → implement → check_project
+```
+
+The user and AI agree on the architecture before the first real implementation pass. The generated contract becomes the source of truth for future changes.
+
+### Existing project mode
+
+For an existing codebase, CodeGuards can be introduced by generating an initial intent and architecture snapshot from the current structure, then asking the user what should be preserved, cleaned up, or changed.
+
+That produces a baseline contract for future work:
+
+```text
+inspect existing structure
+        ↓
+bootstrap intent + architecture snapshot
+        ↓
+user confirms or corrects the contract
+        ↓
+future changes are checked against it
+```
+
+The goal is not to freeze accidental messes. Existing projects need a distinction between:
+
+| Concept | Meaning |
+|---|---|
+| Observed architecture | What the code currently does |
+| Intended architecture | What future work must move toward or preserve |
+
+CodeGuards should make that distinction explicit so it can help improve a legacy project instead of preserving every bad pattern it finds.
+
+---
+
+## Static rules vs. dynamic architecture contracts
+
+| Static rule engine | CodeGuards architecture contract |
+|---|---|
+| Starts with generic rules | Starts with the user's goals and constraints |
+| Same checks for every project | Guard behavior is derived from the project contract |
+| Mostly reports style failures | Reports drift from agreed architecture |
+| Easy for agents to treat as busywork | Tells the agent which design decision it violated |
+| Passive documentation is optional | The contract is part of the build workflow |
+| Usually runs after code exists | Shapes the code before traditional tooling sees it |
+
+CodeGuards can still run baseline guards: file size, function size, TODOs, credentials, `unwrap`, tracing, tests, and structural heuristics. Those checks are the floor. The differentiator is that the core guard behavior should be shaped by what the user is actually building.
+
+For Rust, the goal is not to replace `cargo clippy`. The goal is to make the first AI-generated Clippy run less noisy by catching common agent habits earlier: `.unwrap()` spam, missing tracing on async entry points, oversized files, poor module boundaries, and drift from the architecture the user chose.
+
+---
+
+## The core idea: one contract guard, many derived constraints
+
+CodeGuards should not create a pile of unrelated ad hoc checks for every project. The right model is a core **ArchitectureContractGuard** that reads the project's contract and enforces whatever constraints the user and AI established during planning.
+
+```text
+.planning/ARCHITECTURE.md
+        ↓
+ArchitectureContractGuard
+        ↓
+Derived constraints for this project
+        ↓
+Violations explained by contract section and user decision
+```
+
+The constraints are not global opinions. They are decisions captured from the planning session.
+
+Examples:
+
+| User/project decision | Derived enforcement behavior |
+|---|---|
+| "Use layered architecture" | API code may import services, but not repositories directly |
+| "Domain must be framework-independent" | Domain modules may not import web, database, or infrastructure modules |
+| "Use structured tracing" | Public async entry points must carry tracing instrumentation |
+| "No direct SQL outside persistence" | SQL clients are allowed only in declared persistence modules |
+| "This is a library, not an app" | Public API stability and docs matter more than CLI/runtime checks |
+| "This is a prototype" | Some strict production constraints can be absent or weaker |
+
+If the user never chooses a constraint, CodeGuards should not invent it as a universal rule. If the user chooses it during planning, it becomes part of the contract.
+
+---
+
+## MCP workflow
+
+The enforce-order is deliberate:
+
+```text
 User describes what to build
     ↓
-1. probe                ←  AI asks plain-English questions about goal, scope, preferences
-                          (or about a competitor the user mentioned)
-2. declare_intent       ←  AI commits to architecture (modules, dependencies, error/log/test strategies)
-                          → writes .codeguards/intent.json
-3. plan                 ←  AI materializes architecture + phased tasks
-                          → writes .planning/ARCHITECTURE.md     (machine-enforceable YAML)
-                          → writes .planning/PROJECT_PLAN.md     (phased tasks, each tagged with checks)
-4. update_task          ←  AI marks tasks complete as it builds
-5. check_project        ←  AI runs all guards against the whole project
+1. probe
+   AI asks plain-English questions about goal, scope, architecture, risk,
+   persistence, interfaces, observability, testing, and other high-impact choices
+    ↓
+2. declare_intent
+   AI commits to the selected direction
+   → writes .codeguards/intent.json
+    ↓
+3. plan
+   AI materializes the architecture contract and implementation plan
+   → writes .planning/ARCHITECTURE.md
+   → writes .planning/PROJECT_PLAN.md
+    ↓
+4. update_task / list_tasks
+   AI tracks implementation progress against the plan
+    ↓
+5. check_project
+   CodeGuards runs baseline, structural, language-specific, and contract-derived checks
 ```
 
-`check_project` **refuses to run without intent.json present.** This prevents
-the AI from drifting into "fix later" code without a stated direction. The
-enforcement is server-side, not a polite suggestion.
+---
 
-### What the AI gets back
+## Project files
 
-When `check_project` runs, every guard in the registry fires for every source
-file. Each violation carries:
+`declare_intent` and `plan` create project-local files. These are meant to be committed with the project so the next AI agent, teammate, or coding session sees the same expectations.
 
-- **The rule that caught it** (e.g. `parameter_count`)
-- **Where** (file:line)
-- **Why** (e.g. "Function `add` has 10 parameters; max is 5")
-- **A fix suggestion** drawn from `fixes.py` (e.g. "Extract the data dict into a properties class")
-- **Intent cross-reference** when the rule maps to declared intent (e.g.
-  `swallowed_errors` ↔ `error_handling` from `intent.json`)
+| File | Purpose | Read by |
+|---|---|---|
+| `.codeguards/intent.json` | Raw declared intent from the planning step | guards, report enrichment |
+| `.planning/ARCHITECTURE.md` | Human-readable and machine-readable architecture contract | structural and contract checks |
+| `.planning/PROJECT_PLAN.md` | Phased implementation plan with task state | `update_task`, `list_tasks` |
 
-### Validated end-to-end
+`ARCHITECTURE.md` is the key file. The markdown body explains the design to humans. The YAML frontmatter is the machine interface.
 
-Installed from GitHub onto a stranger's machine via OpenCode. Ran a full
-audit on a Python + JS + HTML codebase with **zero language plugins matching
-the project** — and generic heuristics still caught real issues, the AI
-applied fixes from `fixes.py`, and `check_project` re-confirmed clean.
+Current generated frontmatter is intentionally small:
 
-That is the platform guarantee: **generic layer works without plugin
-coverage.** Plugins add depth, not the on-ramp.
+```yaml
+modules:
+  - api
+  - service
+  - repository
+layers:
+  - api
+  - service
+  - repository
+allowed_dependencies:
+  api:
+    - service
+  service:
+    - repository
+  repository: []
+enforce:
+  - error_handling
+  - logging
+  - testing
+  - tracing
+```
+
+The design direction is to make this contract richer over time, using sections such as `project`, `architecture_profile`, `layers`, `modules`, `constraints`, `quality_goals`, and `decisions`.
+
+Example target shape:
+
+```yaml
+project:
+  type: web_api
+  stage: production
+
+architecture_profile:
+  name: layered
+  rationale: Keep request handling, business workflow, and persistence separate.
+
+layers:
+  api:
+    may_import:
+      - application
+    decision: API code talks to application services, not persistence directly.
+  application:
+    may_import:
+      - domain
+      - ports
+    decision: Workflows coordinate domain behavior through declared ports.
+  domain:
+    may_import: []
+    decision: Domain logic is independent of frameworks, storage, and transport.
+  infrastructure:
+    may_import:
+      - ports
+      - domain
+    decision: Infrastructure implements ports and contains external integrations.
+
+modules:
+  auth:
+    owns:
+      - src/auth/**
+    may_import:
+      - domain
+      - ports
+    decision: Authentication logic is isolated from billing and reporting.
+  billing:
+    owns:
+      - src/billing/**
+    may_import:
+      - domain
+      - ports
+    decision: Billing must not reach into auth internals.
+
+constraints:
+  no_direct_database_from_api:
+    enabled: true
+    decision: Request handlers must go through application services.
+  domain_no_framework_imports:
+    enabled: true
+    decision: Domain code must stay portable and testable.
+  structured_observability:
+    enabled: true
+    decision: Production workflows require traceable execution paths.
+
+quality_goals:
+  tests:
+    unit_required: true
+    integration_required_for:
+      - persistence
+      - external_api_clients
+  docs:
+    public_api_docs_required: true
+```
+
+The contract is not meant to be sacred. Projects evolve. The intended flow is to update the contract deliberately when architecture changes, not accidentally drift away from it during unrelated feature work.
+
+---
+
+## What violations should tell the AI
+
+A useful violation is not just:
+
+```text
+Rule failed.
+```
+
+It should explain the design decision being violated:
+
+```text
+Violation:
+api/orders.py imports repository/sql.py directly.
+
+Derived from:
+.planning/ARCHITECTURE.md → constraints.no_direct_database_from_api
+
+Decision:
+Request handlers must go through application services.
+
+Fix:
+Move the database call behind an application service and import that service instead.
+```
+
+That feedback loop is the core value of CodeGuards. The AI gets a reason tied to the project contract, not a disconnected rule number.
+
+Fix suggestions are centralized in `fixes.py`, so violations can give the agent specific next steps instead of only reporting failure.
+
+---
+
+## Generic-first guarantee
+
+The generic layer works without plugin coverage.
+
+That is the adoption wedge: a project does not need a custom language plugin before CodeGuards can provide value. Generic guards and structural heuristics still catch common AI failure modes, and plugins add depth where precision matters.
+
+```text
+No plugin available
+        ↓
+Generic checks still run
+        ↓
+Structural checks still run
+        ↓
+The AI still gets actionable feedback
+```
+
+Plugins are depth, not the on-ramp.
+
+---
+
+## What exists today
+
+The current implementation already provides the enforce-order pipeline and a set of useful baseline guards.
+
+Implemented:
+
+- MCP server over stdio, with optional HTTP SSE mode.
+- `probe → declare_intent → plan → check_project` workflow.
+- `.codeguards/intent.json` creation and required-before-check enforcement.
+- `.planning/ARCHITECTURE.md` and `.planning/PROJECT_PLAN.md` generation.
+- Generic source checks for common AI coding problems.
+- Structural checks for fan-out, responsibility clusters, layer enforcement, structural health, and growth drift.
+- Project-level `missing_tests` check.
+- Rust guards for `.unwrap()` / `.expect()` and missing tracing instrumentation.
+- Configurable thresholds through `.codeguards.yaml`.
+- Path sandboxing for MCP file operations.
+
+Still being sharpened:
+
+- Treating `ARCHITECTURE.md` as the primary architecture contract input for contract-derived checks.
+- Implementing a core `ArchitectureContractGuard` that evaluates contract data.
+- Planning Mode as the signature greenfield workflow.
+- Existing-project bootstrap mode for generating an initial contract from current structure.
+- Rich architecture profiles such as layered, clean, and hexagonal.
+- Contract-source reporting for every architecture violation.
+- Better distinction between observed structure and intended structure.
+- Deliberate contract update flows for legitimate architecture changes.
+
+This README describes the intended product direction and the current mechanics. The near-term implementation target is to make the architecture contract the first-class source of enforcement, not just a generated planning artifact.
 
 ---
 
@@ -61,27 +490,23 @@ coverage.** Plugins add depth, not the on-ramp.
 pip install mcp pyyaml
 ```
 
-That's it for stdio mode (the default — Claude Code, Hermes, OpenCode).
-
-**For HTTP SSE mode (`--port`), you also need:**
+For HTTP SSE mode, also install:
 
 ```bash
 pip install starlette uvicorn
 ```
 
-These are only imported when `--port` is set; stdio users don't pay the cost.
+The HTTP dependencies are only imported when `--port` is used. Stdio mode is the default for local MCP clients.
 
 ---
 
 ## Run
 
-The MCP server speaks stdio (default) or HTTP SSE (`--port`):
-
 ```bash
-# stdio — for local MCP clients (Claude Code, Hermes, OpenCode, etc.)
+# stdio mode, for local MCP clients
 python server.py
 
-# SSE — for remote agents / HTTP-aware clients (needs starlette+uvicorn above)
+# HTTP SSE mode, for remote or HTTP-aware clients
 python server.py --port 8000
 # clients connect to http://<host>:8000/sse
 ```
@@ -90,125 +515,103 @@ python server.py --port 8000
 
 ## Verified MCP clients
 
-| Client  | Mode  | Verified | Install |
-|---------|-------|----------|---------|
-| Claude Code | stdio | yes | `claude mcp add codeguards --command "python /path/to/server.py"` |
-| Hermes      | stdio | yes | `hermes mcp add codeguards --command "python /path/to/server.py"` |
-| OpenCode    | stdio | yes | registered via OpenCode's MCP config |
+| Client | Mode | Status | Example install |
+|---|---|---|---|
+| Claude Code | stdio | verified | `claude mcp add codeguards --command "python /path/to/server.py"` |
+| Hermes | stdio | verified | `hermes mcp add codeguards --command "python /path/to/server.py"` |
+| OpenCode | stdio | verified | registered through OpenCode MCP config |
 
-**Any stdio MCP client works.** The conversation above is generic MCP.
-The friendship validation came from OpenCode specifically; Claude Code and
-Hermes are listed in `server.py`'s docstring. Codex / Cursor are not
-verified — drop me a note if you run it on either.
+Any stdio-capable MCP client should be able to call the server. Codex and Cursor are design targets, but are not listed as verified here.
 
 ---
 
-## Tools (10 total)
+## MCP tools
 
-`server.py` exposes ten MCP tools. The pipeline above uses five; the rest
-are observers / diagnostics.
+`server.py` exposes ten MCP tools.
 
-| Tool | What it does |
-|------|--------------|
-| `probe` | Asks plain-English questions before code is written. Optionally accepts `competitor` to scaffold a comparison. |
-| `declare_intent` | Writes `intent.json` (modules, deps, error/log/test strategies). Required before `check_project`. |
-| `plan` | Writes `.planning/ARCHITECTURE.md` and `.planning/PROJECT_PLAN.md` with YAML frontmatter. Refuses without intent. |
-| `update_task` | Marks tasks complete / in-progress / pending in `PROJECT_PLAN.md`. |
-| `list_tasks` | Shows pending tasks. |
-| `check_project` | Runs **all** enabled guards against the full project. Refuses without intent. |
-| `check_file` | Runs enabled guards against a single file. |
-| `detect_languages` | Lists languages detected in the project. |
-| `list_guards` | Lists all available guards and the languages they apply to. |
-| `save_baseline` | Snapshots current structural metrics for growth-drift detection. |
-
----
-
-## What the planning artifacts look like
-
-`declare_intent` + `plan` produce three files (per project):
-
-| File | Owned by | Read by |
-|------|----------|---------|
-| `.codeguards/intent.json` | project, git-tracked | guards |
-| `.planning/ARCHITECTURE.md` | project, git-tracked | `check_layer_enforcement` reads YAML frontmatter (`allowed_dependencies`) |
-| `.planning/PROJECT_PLAN.md` | project, git-tracked | `update_task`, `list_tasks` read YAML frontmatter (`phases[].tasks[]`) |
-
-The YAML frontmatter is the **machine-enforceable shape** of the
-plan. The markdown body beneath it is the **human-readable** shape. They are
-written together and stay in sync.
+| Tool | Purpose |
+|---|---|
+| `probe` | Ask plain-English planning questions before code is written. |
+| `declare_intent` | Save architecture intent to `.codeguards/intent.json`. Required before `check_project`. |
+| `plan` | Generate `.planning/ARCHITECTURE.md` and `.planning/PROJECT_PLAN.md`. Refuses without intent. |
+| `update_task` | Mark a task complete, pending, or in progress in `PROJECT_PLAN.md`. |
+| `list_tasks` | Show pending tasks from the project plan. |
+| `check_project` | Run enabled guards against the whole project. Refuses without intent. |
+| `check_file` | Run enabled per-file checks against one file. |
+| `detect_languages` | Detect project languages from marker files and source extensions. |
+| `list_guards` | List available guards and the languages they apply to. |
+| `save_baseline` | Snapshot structural metrics for later growth-drift detection. |
 
 ---
 
-## Built-in guards
+## Built-in guards today
 
-The `list_guards` tool reports **21 entries**: 18 generic + 1 project-level +
-2 language plugins. There are also **5 structural guards** that fire as part
-of `check_project` but aren't enumerated by `list_guards`. Generic layer is
-what catches most things when no plugin matches — that's the friend-session
-proof point.
+These are the current baseline checks. They are useful on their own, but they are not the full product vision. The product direction is for the core architecture contract to decide which constraints matter for a specific project.
 
-### Generic (per-file, in `guards/generic.py`) — 18
+### Generic per-file guards
+
+These run against source files and catch common AI-generated code problems.
 
 | Guard | Catches |
-|-------|---------|
+|---|---|
 | `file_length` | Production files over the configured line cap |
 | `function_length` | Functions over the configured line cap |
-| `god_file` | Too many public items / imports (SRP signal) |
-| `forbidden_phrases` | Weasel words (`for now`, `temporary`, `should`, `clean`, …) |
-| `glob_imports` | Wildcard imports (`use foo::*`, `from bar import *`) |
-| `debug_statements` | `println!` / `console.log` / `print()` left in production |
-| `commented_code` | Dead code blocks in comments |
+| `god_file` | Too many public items or imports |
+| `forbidden_phrases` | Vague terms such as `temporary`, `for now`, `maybe`, `clean` |
+| `glob_imports` | Wildcard imports such as `use foo::*` or `from bar import *` |
+| `debug_statements` | `println!`, `console.log`, or `print()` left in production code |
+| `commented_code` | Dead code blocks left in comments |
 | `magic_numbers` | Unexplained numeric literals |
-| `duplicated_code` | Copy-paste code blocks |
-| `unsafe_patterns` | `eval` / `exec` / `unsafe` blocks |
-| `deep_nesting` | Nesting depth over the configured cap |
-| `parameter_count` | Functions over the configured parameter cap |
-| `credentials` | API keys / tokens / secrets in source |
-| `action_items` | `TODO` / `FIXME` / `HACK` without an issue link |
-| `hardcoded_values` | Raw URLs / IPs / ports as literals |
-| `missing_docs` | Public items without docstrings |
-| `swallowed_errors` | Empty `catch` / `except` blocks |
-| `no_stubs` | `todo!` / `unimplemented!` macros in production |
+| `duplicated_code` | Repeated copy-paste line blocks |
+| `unsafe_patterns` | `eval`, `exec`, or Rust `unsafe` patterns |
+| `deep_nesting` | Excessive nesting depth |
+| `parameter_count` | Functions with too many parameters |
+| `credentials` | API keys, tokens, and obvious secrets in source |
+| `action_items` | `TODO`, `FIXME`, or `HACK` without issue tracking |
+| `hardcoded_values` | Raw URLs, IPs, and ports as literals |
+| `missing_docs` | Public items without docstrings or doc comments |
+| `swallowed_errors` | Empty `catch` or `except` blocks |
+| `no_stubs` | `todo!`, `unimplemented!`, or stub placeholders in production |
 
-### Structural (multi-file, in `guards/structural.py`) — 5
+### Structural guards
 
-| Guard | Catches |
-|-------|---------|
-| `responsibility_clusters` | Files importing too widely — drift toward communication hubs |
-| `fan_out` | A module with too many direct dependencies |
-| `layer_enforcement` | Module imports outside the `allowed_dependencies` declared in `ARCHITECTURE.md` |
-| `structural_health` | Composite score from baselines and growth-drift |
-| `growth_drift` | (internal — driven by `save_baseline`) |
-
-### Project-level (whole-project analysis) — 1
+These reason across imports and project structure.
 
 | Guard | Catches |
-|-------|---------|
-| `missing_tests` | Source files without matching test files (per-language test dirs) |
+|---|---|
+| `responsibility_clusters` | Files touching too many concern domains |
+| `fan_out` | Modules becoming coordination hubs through too many dependencies |
+| `layer_enforcement` | Imports that violate configured layer rules |
+| `structural_health` | Composite structure score based on fan-out and responsibility spread |
+| `growth_drift` | Structural growth compared with a saved baseline |
 
-Runs once per `check_project` call (not per file) and is reported under the
-same `missing_tests` name.
+### Project-level guards
 
-### Language plugins — 2 (Rust today; others are templates below)
+These run once per project check, not once per source file.
 
-| Guard | Languages | Catches |
-|-------|-----------|---------|
-| `no_unwrap` | Rust | `.unwrap()` / `.expect()` in library code |
-| `tracing_instrument` | Rust | Public async fns missing `#[tracing::instrument]` |
+| Guard | Catches |
+|---|---|
+| `missing_tests` | Source files without matching tests, below the configured test ratio |
+
+### Language-specific guards
+
+Rust support exists today.
+
+| Guard | Language | Catches |
+|---|---|---|
+| `no_unwrap` | Rust | `.unwrap()`, `.expect()`, and `.unwrap_unchecked()` in library code |
+| `tracing_instrument` | Rust | Public async functions missing `#[tracing::instrument]` |
 
 ---
 
 ## Configuration
 
-Drop a `.codeguards.yaml` in your project root. Every value has a default —
-override only what you care about. Use **CodeGuards' own self-config** as
-a realistic example:
+Drop `.codeguards.yaml` in the project root to tune defaults.
 
 ```yaml
-# .codeguards.yaml — CodeGuards self-config (its own project)
 guards:
   file_length:
-    max_prod: 800    # orchestrator files legitimately touch many modules
+    max_prod: 800
     max_test: 600
   function_length:
     max: 60
@@ -221,50 +624,40 @@ guards:
     max_imports: 40
   deep_nesting:
     max_depth: 15
-  # Quieter by default — opts into generic heuristics selectively.
-  forbidden_phrases: { enabled: false }
-  missing_docs:      { enabled: false }
-  missing_tests:     { min_test_ratio: 0.0 }
-  magic_numbers:     { enabled: false }
-  structural_health: { enabled: false }
-  responsibility_clusters: { enabled: false }
-  duplicated_code:   { enabled: false }
+  forbidden_phrases:
+    enabled: false
+  missing_docs:
+    enabled: false
+  missing_tests:
+    min_test_ratio: 0.3
 ```
 
-If `.codeguards.yaml` is absent, sensible defaults apply.
+`.codeguards.yaml` is for guard configuration and thresholds. The project-specific architecture contract belongs in `.planning/ARCHITECTURE.md`.
 
 ---
 
-## Intent overrides enforcement
+## Intent and violation context
 
-`intent.json` reclassifies violations **as expected** when the project
-explicitly declares the condition.
+`intent.json` lets violations be interpreted against declared project intent.
 
-Example — the friend-validation codebase had 522 `magic_numbers` violations
-that were *actually property prices / sqft / zip codes*. With
-`intent.json` declaring domain data, those stay flagged as
-`acceptable_per_intent` rather than forcing the AI to "fix" them.
+For example, a `swallowed_errors` violation can be reported with the declared error-handling strategy, and a `no_unwrap` violation can point back to the project's stated error-handling rule.
 
-The mechanism: `guards/__init__.py::enrich_with_fixes` cross-references
-violations against `intent.py::GUARD_TO_RULE` (a 6-entry fixed map:
-`debug_statements↔logging`, `swallowed_errors↔error_handling`,
-`no_stubs↔testing`, `missing_docs↔documentation`, `no_unwrap↔error_handling`,
-`tracing_instrument↔tracing`).
+The architecture contract expands this principle: every contract-derived violation should carry project-specific context and cite the decision it came from.
 
 ---
 
-## Writing a plugin
+## Plugin system
 
-The plugin system has **two kinds of contributions** to the
-`GuardRegistry`:
+Plugins add depth for specific languages. They are not the mechanism for building the project's architecture contract.
 
-1. **Guards** — per-language checks with their own violation logic.
-2. **Extractors** — capability providers that the *generic* layer
-   consults. E.g. "Python: how do I find function blocks?" — answer
-   registered once and `check_function_length` uses it transparently.
+The plugin registry supports two contribution types:
+
+1. **Guards**: per-language checks with custom violation logic.
+2. **Extractors**: parsing helpers used by generic guards, such as language-aware function block extraction.
+
+Example shape:
 
 ```python
-# plugins/python.py — TEMPLATE (no Python plugin ships yet; only rust.py today)
 from plugins import GuardRegistry
 
 
@@ -276,111 +669,83 @@ def register(registry: GuardRegistry) -> None:
         description="No print() in library code",
     )
 
-    # Capability provider — generic guards call this via get_extractor("function_blocks", ext)
-    # when they encounter a .py file. Without an extractor, generic guards fall back
-    # to language-agnostic regex (still works, just less precise).
     registry.register_extractor(
         capability="function_blocks",
         file_extensions={".py"},
-        extractor_fn=_python_function_blocks,  # returns list of (name, start, end)
+        extractor_fn=_python_function_blocks,
     )
 ```
 
-Plugin discovery: at server startup, `plugins/*.py` is scanned and each
-module's `register(registry)` is called. No global pollution —
-each project's plugin registration goes into its own `plugins/`.
-
-Generic guards that need language-specific parsing **fall back to
-language-agnostic regex** if no extractor is registered. They still work —
-they just miss edge cases. That's why plugins are **depth**, not the
-on-ramp.
+At server startup, CodeGuards loads installed files from its own `plugins/` directory. Generic guards fall back to language-agnostic regex when no extractor exists. Plugins improve precision, but the dynamic architecture contract is the core product layer.
 
 ---
 
 ## Sandbox
 
-Every MCP path argument is validated before file I/O:
+Every MCP path argument is validated before file I/O.
 
-**Denied on sight** (resolved path):
+Denied path segments:
 
-- Credential stores: `~/.aws`, `~/.ssh`, `~/.kube`, `~/.docker`, `~/.npmrc`,
-  `~/.netrc`, `~/.pypirc`, `~/.git-credentials`, `~/.gitconfig`
-- Kernel / system: `/proc`, `/sys`, `/dev`, `/boot`, `/var/log`, `/var/run`
-- Non-existent paths
+- `.aws`
+- `.ssh`
+- `.kube`
+- `.docker`
+- `.npmrc`
+- `.netrc`
+- `.pypirc`
+- `.git-credentials`
+- `.gitconfig`
 
-`..` and symlinks are resolved *first*, so `/tmp/escape/../../etc` cannot
-bypass the deny-list. See `server.py::_is_safe_project_path` and
-`tests/test_server.py::test_sandbox_denies_aws_credentials` for the test
-that pins this behavior.
+Denied system prefixes:
+
+- `/proc`
+- `/sys`
+- `/dev`
+- `/boot`
+- `/var/log`
+- `/var/run`
+
+CodeGuards also refuses non-existent paths. Paths are resolved before checks, so `..` traversal and symlink tricks cannot bypass the deny list.
 
 ---
 
 ## Project layout
 
-```
+```text
 codeguards-mcp/
-├── server.py              # MCP server, 10 tools, sandbox
-├── planning.py            # ARCHITECTURE.md & PROJECT_PLAN.md writers
-├── intent.py              # intent.json contract & GUARD_TO_RULE
-├── config.py              # .codeguards.yaml loader
-├── constants.py           # default thresholds
-├── detectors.py           # language detection, source-file walker
-├── import_analyzer.py     # AST-aware import graphs (used by layer_enforcement)
-├── fixes.py               # text generators for "fix" suggestions on violations
+├── server.py              # MCP server, tool dispatch, path sandbox
+├── planning.py            # ARCHITECTURE.md and PROJECT_PLAN.md generation
+├── intent.py              # .codeguards/intent.json contract handling
+├── config.py              # .codeguards.yaml defaults and deep merge
+├── detectors.py           # language detection and source walking
+├── import_analyzer.py     # import-domain and layer analysis
+├── fixes.py               # fix suggestion text
 ├── guards/
-│   ├── generic.py         # 18 language-agnostic per-file checks
-│   └── structural.py      # 5 multi-file / structural checks
+│   ├── __init__.py        # guard orchestration and project-level checks
+│   ├── generic.py         # language-agnostic source guards
+│   └── structural.py      # multi-file structural guards
 ├── plugins/
-│   ├── __init__.py        # GuardRegistry (singleton) + loader
-│   └── rust.py            # no_unwrap, tracing_instrument
-├── sample_code/           # small fixtures for testing guards by hand
-│   ├── profile.rs
-│   └── mouse.rs
-└── tests/                 # pytest
+│   ├── __init__.py        # plugin registry and loader
+│   └── rust.py            # Rust-specific guards and extractors
+└── pyproject.toml
 ```
 
 ---
 
 ## Roadmap
 
-- **v0.1.0 (current)** — what you just read. Validated on a stranger's
-  repo via OpenCode.
-- **v0.1.1** — hotfixes (in progress).
-- **v0.2** — architecture-decision-as-source-of-truth, vocabulary-bounded
-  rules, project-scoped session checks. Spec is parked at
-  [`docs/design_v0.2.md`](docs/design_v0.2.md). Implementation begins
-  after v0.1.1 ships.
+Near-term direction:
 
----
+- Promote `.planning/ARCHITECTURE.md` from generated artifact to first-class architecture contract.
+- Add an `ArchitectureContractGuard` that evaluates contract data rather than creating many one-off rule implementations.
+- Add Planning Mode as the signature greenfield workflow.
+- Add existing-project bootstrap mode for creating an initial contract from current structure plus user correction.
+- Add architecture profiles such as layered, clean, and hexagonal.
+- Generate contract constraints from the user's planning choices, not from a universal checklist.
+- Make violations cite the exact contract section and design decision they come from.
+- Separate observed architecture from intended architecture so CodeGuards does not preserve accidental messes.
+- Add explicit contract update flows for legitimate architecture changes.
 
-## Tests
+Long-term identity:
 
-```bash
-pip install -e .[dev]
-pytest tests/
-```
-
-The full suite covers: sandbox boundaries, intent overload,
-`probe → declare_intent → plan → check_project` end-to-end, Rust plugin
-behavior, fan-out / responsibility clusters / layer enforcement, import
-analyzer on multi-file dependency graphs, and dogfood — CodeGuards running
-against its own codebase.
-
----
-
-## Philosophy, briefly
-
-> Every system that decides "this code is correct" works in two halves:
-> a front-half that says what correctness **means**, and a back-half that
-> **enforces** it. Most tools only have a back-half — they infer rules
-> from what's there. CodeGuards has both: the AI + user agree on the goal
-> (intent), agree on the architecture (architecture / plan), and every
-> guard that fires is **measuring the code against that agreement**.
->
-> Right now the goal is small (`intent.json`). In v0.2, the goal moves
-> into `ARCHITECTURE.md` and becomes the project's long-term memory —
-> surviving across AI sessions, model swaps, and the gradual decay of
-> first-week clarity.
-
-— see [`docs/design_v0.2.md`](docs/design_v0.2.md) for the full v0.2
-direction.
+> CodeGuards moves architectural decisions from fragile prompt history into an executable contract that continuously guides AI-generated code, while applying just enough engineering pressure to reduce friction with the rest of the development toolchain.
