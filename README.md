@@ -732,6 +732,74 @@ codeguards-mcp/
 
 ---
 
+## The core problem: absence bugs
+
+CodeGuards exists because AI-generated code has a systematic blind spot: **it cannot detect things that should be there but aren't**.
+
+Linters, clippy, and tests catch *presence* bugs — code that is wrong. They cannot catch *absence* bugs — code that is missing.
+
+Example from a real project (antidetect-browser, 2026-06-30):
+- The API binary (`main.rs`) did not call `logging::init()` before starting the server.
+- All tracing instrumentation in the codebase was silently doing nothing.
+- `cargo build` passed. `cargo test` passed (522 tests). `cargo clippy` passed (0 warnings). Architecture tests passed (17/17).
+- No tool caught it. No test failed. The code was "correct" and completely unobservable.
+
+This is an **absence bug**. The AI wrote everything right except the one thing that makes the system work. The guards caught it only after a human asked "where is logging initialized?"
+
+### What absence bugs look like
+
+| Absence bug | Why tools miss it | How CodeGuards catches it |
+|---|---|---|
+| Binary doesn't call `logging::init()` | No compilation error, tests pass | Guard: "entry point initialization" |
+| API endpoint has no tests | Test suite passes (other tests exist) | Guard: "endpoint test coverage" |
+| Error source chains are dropped | Code compiles, error type is correct | Guard: "error context preservation" |
+| Config validated but not propagated | `config.validate()` is called, check passes | Guard: "config propagation" |
+| `#[tracing::instrument]` missing from pub async fn | Code runs, no compile error | Rust guard: `tracing_instrument` |
+| Panic hook never set | Program runs fine until it crashes | Guard: "panic hook registration" |
+
+These are not code quality issues. They are **architectural completeness** issues. The AI wrote code that passes all local checks but fails to form a working system.
+
+### How CodeGuards activates audit-brain
+
+The guards are not just post-hoc checkers. They are designed to make the AI **think like an auditor while writing code**. When the AI knows a guard exists, it preemptively checks for the condition before writing the code.
+
+The workflow is:
+
+```text
+1. Human notices an absence bug (e.g., "logging isn't initialized")
+2. Human asks AI: "Why did this happen?"
+3. AI investigates and identifies the gap
+4. Human asks: "How do we make sure this never happens again?"
+5. AI proposes a guard rule
+6. Guard is added to CodeGuards
+7. Future AI runs check_project and sees the violation before shipping
+8. Future AI learns to check for this condition proactively
+```
+
+Over time, the guard system accumulates the collective wisdom of every absence bug the human has caught. The AI doesn't just fix the bug — it **encodes the lesson into the enforcement system** so future AI agents inherit the knowledge.
+
+This is pressure-driven development. The human doesn't write code. The human applies pressure through questions. The AI figures out the answer and locks it into the guard system.
+
+### The human-AI conversation
+
+CodeGuards is designed for a specific workflow: a non-technical human and an AI coding agent, working together through conversation.
+
+The human describes what they want in plain English. The AI translates it into technical terms. If the AI is confused, it asks clarifying questions — it doesn't pretend to know. If the human's preferred approach is technically weak, the AI says so: *"We can do it that way, but this other approach is much better because…"*
+
+The guard system captures the decisions from that conversation and enforces them. This means:
+- The human never needs to learn technical details to get a well-architected system
+- The AI never pretends to understand when it's confused
+- Bad decisions get caught by guards, not by hindsight
+- Good decisions get encoded into the system, not lost in chat history
+
+### What this means for the roadmap
+
+The guards should evolve from "shape checkers" (file length, function length, naming) to **"completeness checkers"** (entry point init, test coverage by endpoint, error context preservation, config propagation, panic hook registration).
+
+Every guard should answer the question: *"Did the AI think about the full system, or just the code it wrote?"*
+
+---
+
 ## Roadmap
 
 Near-term direction:

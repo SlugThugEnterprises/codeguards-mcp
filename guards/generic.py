@@ -51,7 +51,7 @@ def _is_test_path(path: Path) -> bool:
     """
     p = str(path)
     name = path.name
-    if "/tests/" in p or "/test/" in p:
+    if "/tests/" in p or "/test/" in p or p.startswith("tests/") or p.startswith("test/"):
         return True
     if name.startswith("test_") or name.endswith((
         "_test.py", "_test.rs", "_tests.rs",
@@ -745,6 +745,103 @@ def check_missing_docs(path: Path, content: str, cfg: dict) -> list[dict]:
 
 
 # ──────────────────────────────────────────────
+# Architectural completeness — absence bugs
+# ──────────────────────────────────────────────
+
+def check_entry_point_init(path: Path, content: str, cfg: dict) -> list[dict]:
+    """Binary entry points must call required initialization functions.
+
+    Catches absence bugs where the AI writes a main() function but forgets
+    to initialize critical infrastructure (logging, config validation,
+    panic hooks, etc.) before starting services.
+
+    Configured via .codeguards.yaml:
+
+        entry_point_init:
+          required_calls:
+            - pattern: "logging::init"    # Rust
+              before: "tokio::runtime"
+            - pattern: "logging.basicConfig"  # Python
+              before: "app.run"
+            - pattern: "logger\\.configure"  # Node
+              before: "server\\.listen"
+
+    The guard checks that the required pattern appears in the file before
+    the service-start pattern. Skips test files.
+    """
+    if not cfg.get("enabled", True):
+        return []
+    if _is_test_path(path):
+        return []
+
+    required_calls = cfg.get("required_calls", [])
+    if not required_calls:
+        return []  # No init requirements configured for this project
+
+    violations: list[dict] = []
+
+    # Check if this file contains a main/entry point
+    is_entry_point = False
+    entry_patterns = [
+        r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+main\s*\(",       # Rust
+        r"^\s*(?:async\s+)?def\s+main\s*\(",                  # Python
+        r"^\s*function\s+main\s*\(",                          # JS/TS
+        r'\.listen\s*\(',                                      # Node servers
+        r'\.serve\s*\(',                                       # Generic servers
+    ]
+    for pat in entry_patterns:
+        if re.search(pat, content):
+            is_entry_point = True
+            break
+
+    if not is_entry_point:
+        return []  # Not an entry point file, skip
+
+    for req in required_calls:
+        init_pattern = req.get("pattern", "")
+        before_pattern = req.get("before", "")
+        if not init_pattern or not before_pattern:
+            continue
+
+        try:
+            init_re = re.compile(init_pattern)
+            before_re = re.compile(before_pattern)
+        except re.error:
+            continue
+
+        init_match = init_re.search(content)
+        before_match = before_re.search(content)
+
+        if before_match and not init_match:
+            violations.append({
+                "file": str(path),
+                "line": before_match.start() and content[:before_match.start()].count("\n") + 1 or 1,
+                "message": (
+                    f"Entry point calls `{before_pattern}` but missing required "
+                    f"initialization `{init_pattern}` — add initialization before "
+                    f"starting the service (absence bug: infrastructure not initialized)"
+                ),
+                "guard": "entry_point_init",
+                "principle": "Architectural Completeness",
+                "severity": "error",
+            })
+        elif init_match and before_match and init_match.start() > before_match.start():
+            violations.append({
+                "file": str(path),
+                "line": content[:before_match.start()].count("\n") + 1,
+                "message": (
+                    f"Initialization `{init_pattern}` appears AFTER `{before_pattern}` "
+                    f"— move initialization before service startup"
+                ),
+                "guard": "entry_point_init",
+                "principle": "Architectural Completeness",
+                "severity": "error",
+            })
+
+    return violations
+
+
+# ──────────────────────────────────────────────
 # All generic guards — registered in __init__.py
 # ──────────────────────────────────────────────
 
@@ -767,6 +864,7 @@ ALL_GENERIC_CHECKS = {
     "no_stubs": check_no_stubs,
     "hardcoded_values": check_hardcoded_values,
     "missing_docs": check_missing_docs,
+    "entry_point_init": check_entry_point_init,
 }
 
 

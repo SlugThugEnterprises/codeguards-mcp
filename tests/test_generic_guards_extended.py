@@ -470,3 +470,134 @@ def test_duplicated_code_disabled():
         {"enabled": False},
     )
     assert violations == []
+
+
+# ── check_entry_point_init ──
+
+from guards.generic import check_entry_point_init
+
+
+def test_entry_point_init_clean_rust():
+    """Rust main with logging::init before tokio runtime."""
+    code = (
+        "fn main() {\n"
+        "    logging::init(&config.log_level);\n"
+        "    let rt = tokio::runtime::Runtime::new().unwrap();\n"
+        "    rt.block_on(async { start().await });\n"
+        "}\n"
+    )
+    violations = check_entry_point_init(
+        Path("src/main.rs"), code,
+        {"enabled": True, "required_calls": [
+            {"pattern": "logging::init", "before": "tokio::runtime"},
+        ]},
+    )
+    assert violations == [], f"Expected 0, got {violations}"
+
+
+def test_entry_point_init_missing_init():
+    """Rust main without logging::init — absence bug."""
+    code = (
+        "fn main() {\n"
+        "    let rt = tokio::runtime::Runtime::new().unwrap();\n"
+        "    rt.block_on(async { start().await });\n"
+        "}\n"
+    )
+    violations = check_entry_point_init(
+        Path("src/main.rs"), code,
+        {"enabled": True, "required_calls": [
+            {"pattern": "logging::init", "before": "tokio::runtime"},
+        ]},
+    )
+    assert len(violations) >= 1
+    assert "missing required initialization" in violations[0]["message"].lower()
+
+
+def test_entry_point_init_wrong_order():
+    """Init appears after service start — still a bug."""
+    code = (
+        "fn main() {\n"
+        "    let rt = tokio::runtime::Runtime::new().unwrap();\n"
+        "    rt.block_on(async { start().await });\n"
+        "    logging::init(&config.log_level);\n"
+        "}\n"
+    )
+    violations = check_entry_point_init(
+        Path("src/main.rs"), code,
+        {"enabled": True, "required_calls": [
+            {"pattern": "logging::init", "before": "tokio::runtime"},
+        ]},
+    )
+    assert len(violations) >= 1
+    assert "AFTER" in violations[0]["message"]
+
+
+def test_entry_point_init_skips_test_files():
+    """Test files should not be checked."""
+    code = "fn main() { tokio::runtime::new().unwrap(); }\n"
+    violations = check_entry_point_init(
+        Path("tests/main.rs"), code,
+        {"enabled": True, "required_calls": [
+            {"pattern": "logging::init", "before": "tokio"},
+        ]},
+    )
+    assert violations == []
+
+
+def test_entry_point_init_skips_non_entry_point():
+    """Library code without main() should not be checked."""
+    code = "pub fn helper() { let x = 1; }\n"
+    violations = check_entry_point_init(
+        Path("src/lib.rs"), code,
+        {"enabled": True, "required_calls": [
+            {"pattern": "logging::init", "before": "tokio"},
+        ]},
+    )
+    assert violations == []
+
+
+def test_entry_point_init_disabled():
+    violations = check_entry_point_init(
+        Path("src/main.rs"), "fn main() { tokio::runtime::new(); }",
+        {"enabled": False, "required_calls": [
+            {"pattern": "logging::init", "before": "tokio"},
+        ]},
+    )
+    assert violations == []
+
+
+def test_entry_point_init_no_config():
+    """When no required_calls configured, should not flag anything."""
+    code = "fn main() { tokio::runtime::new(); }"
+    violations = check_entry_point_init(
+        Path("src/main.rs"), code,
+        {"enabled": True, "required_calls": []},
+    )
+    assert violations == []
+
+
+def test_entry_point_init_python_clean():
+    """Python main with logging.basicConfig before app.run."""
+    code = (
+        "def main():\n"
+        "    logging.basicConfig(level=logging.INFO)\n"
+        "    app.run(host='0.0.0.0', port=8000)\n"
+    )
+    violations = check_entry_point_init(
+        Path("main.py"), code,
+        {"enabled": True, "required_calls": [
+            {"pattern": "logging.basicConfig", "before": "app.run"},
+        ]},
+    )
+    assert violations == []
+
+
+def test_entry_point_init_python_missing():
+    code = "def main():\n    app.run(host='0.0.0.0', port=8000)\n"
+    violations = check_entry_point_init(
+        Path("main.py"), code,
+        {"enabled": True, "required_calls": [
+            {"pattern": "logging.basicConfig", "before": "app.run"},
+        ]},
+    )
+    assert len(violations) >= 1

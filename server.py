@@ -7,6 +7,14 @@ Usage:
 
 Register with Hermes:
     hermes mcp add codeguards --command "python /path/to/server.py"
+
+Thinking Pause:
+    When an operation will take noticeable time (>3s), the AI should signal
+    before starting — not after it's already been silent. This prevents the
+    "did it freeze?" problem where humans assume silence = broken.
+
+    The AI knows when it's about to do something expensive (architecture
+    analysis, multi-file refactoring, guard evaluation). It should say so.
 """
 
 import argparse
@@ -91,8 +99,31 @@ def _is_safe_project_path(path_arg: str) -> tuple[bool, str]:
 
 
 # ──────────────────────────────────────────────
+# Thinking pause — signal before expensive operations
+# ──────────────────────────────────────────────
+
+def notify_thinking(context: str) -> None:
+    """Signal to the user that an expensive operation is starting.
+
+    Call this BEFORE starting work that will take >3 seconds. The human
+    should know you're deliberating, not frozen.
+
+    Examples:
+        notify_thinking("architecture analysis across 47 files")
+        notify_thinking("working through the safest refactor approach")
+        notify_thinking("evaluating 12 guards against the full project")
+    """
+    # In stdio mode, write to stderr so it appears in the terminal
+    # without interfering with MCP protocol on stdout.
+    msg = (
+        f"⏳ Taking a moment to think through {context} — "
+        f"want to get this right. Should just be a moment."
+    )
+    print(msg, file=sys.stderr, flush=True)
+
+
+# ──────────────────────────────────────────────
 # Tool handlers — one async function per tool
-# Each can be imported and tested independently
 # ──────────────────────────────────────────────
 
 async def handle_check_project(registry: GuardRegistry, arguments: dict) -> list[TextContent]:
@@ -109,6 +140,7 @@ async def handle_check_project(registry: GuardRegistry, arguments: dict) -> list
             "Writing code without understanding what you need is "
             "how 129 files of wrong architecture happen."
         ))]
+    notify_thinking("guard evaluation across the project")
     config = load_config(path)
     languages = detect_languages(path)
     violations = run_checks(path, config, registry, languages)
@@ -211,6 +243,7 @@ async def handle_list_guards(registry: GuardRegistry, arguments: dict) -> list[T
         ("swallowed_errors", "No empty catch/except blocks"),
         ("no_stubs", "No todo!/unimplemented! in production"),
         ("missing_tests", "Source files must have matching test files"),
+        ("entry_point_init", "Binary entry points must call required init functions (absence bug detection)"),
     ]
     guards_info = [{"name": n, "languages": "all", "description": d} for n, d in guard_descriptions]
     for g in registry.guards:
