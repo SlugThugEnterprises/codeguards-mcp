@@ -802,17 +802,27 @@ Every guard should answer the question: *"Did the AI think about the full system
 
 ## Roadmap
 
-Near-term direction:
+### v0.2 (current)
 
-- Promote `.planning/ARCHITECTURE.md` from generated artifact to first-class architecture contract.
-- Add an `ArchitectureContractGuard` that evaluates contract data rather than creating many one-off rule implementations.
-- Add Planning Mode as the signature greenfield workflow.
-- Add existing-project bootstrap mode for creating an initial contract from current structure plus user correction.
-- Add architecture profiles such as layered, clean, and hexagonal.
-- Generate contract constraints from the user's planning choices, not from a universal checklist.
-- Make violations cite the exact contract section and design decision they come from.
-- Separate observed architecture from intended architecture so CodeGuards does not preserve accidental messes.
-- Add explicit contract update flows for legitimate architecture changes.
+- ✅ `probe → declare_intent → plan → check_project` workflow
+- ✅ `.codeguards/intent.json` and `.planning/ARCHITECTURE.md` generation
+- ✅ Baseline guards (file length, function length, credentials, unsafe patterns, etc.)
+- ✅ Structural guards (fan-out, responsibility clusters, layer enforcement)
+- ✅ Language-specific guards (Rust: no_unwrap, tracing_instrument)
+- ✅ `entry_point_init` guard — first "completeness checker" for absence bugs
+- ✅ Thinking pause notifications for expensive operations
+- ✅ Test suite: 315 tests passing
+- ✅ Coach-not-cop philosophy — positive reinforcement, opt-in checkpoints, agent-tunable modes
+
+### v0.3 (next)
+
+- **3 enforcement modes** — `fast` (suggestions only), `balanced` (random sampling), `strict` (every file review)
+- **Coaching reports** — not just violations, but positives, streaks, and suggestions
+- **Test library architecture** — guard tests live in `~/.codeguard/tests/` (outside any project), managed by the MCP server so the AI cannot silently edit them to make failures go away
+- **tests.yaml** — maps architecture constraint declarations to test modules; the architecture document becomes the scope gate (with `ARCHITECTURE.md` → full enforcement; without → baseline only)
+- **Composable tests** — tests written for one project are automatically available to all future projects; the library compounds over time
+- **ArchitectureContractGuard** — reads `.planning/ARCHITECTURE.md` YAML frontmatter and resolves applicable tests dynamically, not from a static checklist
+- **Remote test registry** — shared test modules published by the community (e.g., `@rust-expert/test_entry_point_init`)
 
 Long-term identity:
 
